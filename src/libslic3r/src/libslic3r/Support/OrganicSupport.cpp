@@ -9,6 +9,7 @@
 #include <boost/container/vector.hpp>
 #include <cassert>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <cstddef>
 
+#include "Slic3r/Biz/Algorithms/ExPolygon.hpp"
 #include "Slic3r/Biz/Algorithms/Polygon.hpp"
 #include "Slic3r/Biz/Algorithms/AABBTreeLines.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -946,6 +948,8 @@ static void organic_smooth_branches_avoid_collisions(
         std::sort(stat.begin(), stat.end());
         printf("iteration: %d, moved: %d, collision depth: min %lf, max %lf, median %lf\n", int(iter), int(num_moved), stat.front(), stat.back(), stat[stat.size() / 2]);
 #endif
+        if (std::getenv("PRUSASLICER_ORGANIC_STATS") && (num_moved == 0 || iter + 1 == num_iter + num_iter_collision_only))
+            std::fprintf(stderr, "organic-stats: nudge iterations %zu, spheres still colliding %zu of %zu\n", iter + 1, size_t(num_moved), collision_spheres.size());
         if (num_moved == 0)
             break;
     }
@@ -1522,33 +1526,45 @@ void organic_draw_branches(
     // islands too small to matter, or ones that could only land on the object when
     // support may not rest on it, are removed.
     {
-        if (slices.size() < top_contacts.size())
-            slices.resize(top_contacts.size());
+        // Contact layers and the interface layers under them are stored apart from the branch slices.
+        const std::array<SupportGeneratorLayersPtr*, 3> roof_layers {
+            &top_contacts, &interface_placer.top_interfaces_mutable(), &interface_placer.top_base_interfaces_mutable() };
+        for (const SupportGeneratorLayersPtr *layers : roof_layers)
+            if (slices.size() < layers->size())
+                slices.resize(layers->size());
         const size_t num_layers   = slices.size();
         const double min_overlap  = sqr(double(config.support_line_width));
         const float  touch        = float(0.5 * config.support_line_width);
         const int    gap_layers   = int(config.z_distance_bottom_layers);
         // Object at layer_idx plus the bottom Z gap above it: support may rest on top of this.
-        auto object_below = [&volumes, gap_layers](LayerIndex layer_idx) {
-            Polygons out;
-            for (LayerIndex i = std::max<LayerIndex>(0, layer_idx - gap_layers); i <= layer_idx; ++ i)
-                append(out, volumes.getCollision(0, i, false));
-            return union_(out);
+        std::vector<std::optional<Polygons>> object_below_cache(num_layers);
+        auto object_below = [&volumes, gap_layers, &object_below_cache](LayerIndex layer_idx) -> const Polygons& {
+            std::optional<Polygons> &out = object_below_cache[layer_idx];
+            if (! out) {
+                Polygons polygons;
+                for (LayerIndex i = std::max<LayerIndex>(0, layer_idx - gap_layers); i <= layer_idx; ++ i)
+                    append(polygons, volumes.getCollision(0, i, false));
+                out = union_(polygons);
+            }
+            return *out;
         };
-        auto support_at = [&slices, &top_contacts](size_t layer_idx) {
+        auto roof_at = [&roof_layers](size_t layer_idx, auto &&fn) {
+            for (SupportGeneratorLayersPtr *layers : roof_layers)
+                if (layer_idx < layers->size() && (*layers)[layer_idx])
+                    fn((*layers)[layer_idx]->polygons);
+        };
+        auto support_at = [&slices, &roof_at](size_t layer_idx) {
             Polygons out = slices[layer_idx].polygons;
             append(out, slices[layer_idx].bottom_contacts);
-            if (layer_idx < top_contacts.size() && top_contacts[layer_idx])
-                append(out, top_contacts[layer_idx]->polygons);
+            roof_at(layer_idx, [&out](const Polygons &roof) { append(out, roof); });
             return out;
         };
         size_t num_extended = 0;
         size_t num_dropped  = 0;
         Polygons kept_below;
         for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
-            Slice                 &slice = slices[layer_idx];
-            SupportGeneratorLayer *top   = layer_idx < top_contacts.size() ? top_contacts[layer_idx] : nullptr;
-            Polygons all = support_at(layer_idx);
+            Slice   &slice = slices[layer_idx];
+            Polygons all   = support_at(layer_idx);
             if (all.empty()) {
                 kept_below.clear();
                 continue;
@@ -1560,11 +1576,12 @@ void organic_draw_branches(
             Polygons below = kept_below;
             append(below, object_below(LayerIndex(layer_idx) - 1));
             below = expand(union_(below), touch);
-            Polygons kept;
+            Polygons     kept;
+            const size_t num_dropped_before = num_dropped;
             for (ExPolygon &island : union_ex(all)) {
                 Polygons island_polygons = Algorithms::ExPolygon::to_polygons(std::move(island));
                 double   island_area     = Algorithms::Polygon::area(island_polygons);
-                double   held            = Algorithms::Polygon::area(intersection(island_polygons, below));
+                double   held            = Algorithms::Polygon::area(intersection_clipped(island_polygons, below));
                 if (held >= std::min(min_overlap, 0.5 * island_area)) {
                     append(kept, std::move(island_polygons));
                     continue;
@@ -1575,7 +1592,7 @@ void organic_draw_branches(
                 bool                  on_object = false;
                 for (LayerIndex l = LayerIndex(layer_idx) - 1; l >= 0; -- l) {
                     // Part of the column above the object (with the Z gap) rests there and stops.
-                    Polygons next = diff(col, object_below(l));
+                    Polygons next = diff_clipped(col, object_below(l));
                     if (Algorithms::Polygon::area(next) < Algorithms::Polygon::area(col) - EPSILON)
                         on_object = true;
                     col = std::move(next);
@@ -1584,7 +1601,7 @@ void organic_draw_branches(
                     // Landed on support already standing at this layer.
                     Polygons existing = support_at(size_t(l));
                     double   area     = Algorithms::Polygon::area(col);
-                    if (Algorithms::Polygon::area(intersection(col, existing)) >= std::min(min_overlap, 0.5 * area))
+                    if (Algorithms::Polygon::area(intersection_clipped(col, existing)) >= std::min(min_overlap, 0.5 * area))
                         break;
                     column.emplace_back(col);
                     if (l == 0)
@@ -1605,13 +1622,11 @@ void organic_draw_branches(
             if (kept.empty()) {
                 slice.polygons.clear();
                 slice.bottom_contacts.clear();
-                if (top)
-                    top->polygons.clear();
-            } else {
+                roof_at(layer_idx, [](Polygons &roof) { roof.clear(); });
+            } else if (num_dropped > num_dropped_before) {
                 slice.polygons = intersection(slice.polygons, kept);
                 slice.bottom_contacts = intersection(slice.bottom_contacts, kept);
-                if (top)
-                    top->polygons = intersection(top->polygons, kept);
+                roof_at(layer_idx, [&kept](Polygons &roof) { roof = intersection(roof, kept); });
             }
             kept_below = std::move(kept);
             throw_on_cancel();
@@ -1622,7 +1637,8 @@ void organic_draw_branches(
             std::vector<ExPolygons> layers(num_layers);
             std::vector<float>      grid(num_layers);
             for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
-                layers[layer_idx] = union_ex(support_at(layer_idx));
+                // 0.05 mm simplification keeps the mesh a manageable size for importing.
+                layers[layer_idx] = Algorithms::ExPolygon::simplify(union_ex(support_at(layer_idx)), scaled<double>(0.05));
                 grid[layer_idx]   = float(layer_z(slicing_params, config, layer_idx));
             }
             OrganicMeshExport support_export;

@@ -569,6 +569,8 @@ public:
     const SupportParameters    &support_parameters;
     const TreeSupportSettings  &config;
     SupportGeneratorLayersPtr&  top_contacts_mutable() { return this->top_contacts; }
+    SupportGeneratorLayersPtr&  top_interfaces_mutable() { return this->top_interfaces; }
+    SupportGeneratorLayersPtr&  top_base_interfaces_mutable() { return this->top_base_interfaces; }
 
 public:
     // Insert the contact layer and some of the inteface and base interface layers below.

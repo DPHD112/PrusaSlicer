@@ -86,6 +86,8 @@ def main():
     ap.add_argument('--below', type=float, default=0.6, help='how far below an island to look for plastic, mm')
     ap.add_argument('--min-area', type=float, default=0.3, help='ignore islands smaller than this, mm^2')
     ap.add_argument('--min-held', type=float, default=0.10, help='an island counts as held when this fraction of it has plastic below')
+    ap.add_argument('--sparse-gap', type=float, default=3.0,
+                    help='support below counts as a solid area across gaps up to this wide, mm (sparse support infill)')
     args = ap.parse_args()
 
     layers = parse(args.gcode)
@@ -99,11 +101,17 @@ def main():
     first_z = zs[0]
 
     all_grids = {}
+    support_grids = {}
+    closing_r = max(1, int(round(args.sparse_gap / 2 / args.px)))
+    yy, xx = np.mgrid[-closing_r:closing_r + 1, -closing_r:closing_r + 1]
+    closing = xx * xx + yy * yy <= closing_r * closing_r
     floating = []
     n_support_layers = 0
     for z in zs:
         all_grids[z] = rasterize(layers[z], origin, shape, args.px, support_only=False)
         sup = rasterize(layers[z], origin, shape, args.px, support_only=True)
+        # Support printed as sparse lines holds up the layer above across the gaps between them.
+        support_grids[z] = ndimage.binary_closing(sup, closing) if sup.any() else sup
         if not sup.any():
             continue
         n_support_layers += 1
@@ -112,7 +120,7 @@ def main():
         below = np.zeros(shape, bool)
         for zb in zs:
             if z - args.below - 1e-6 <= zb < z - 1e-6:
-                below |= all_grids[zb]
+                below |= all_grids[zb] | support_grids[zb]
         below = ndimage.binary_dilation(below, iterations=1)
         labels, n = ndimage.label(sup)
         if n == 0:

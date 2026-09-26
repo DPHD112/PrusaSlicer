@@ -68,11 +68,58 @@ def stepped_overhangs():
     return parts
 
 
+def roof_on_post(z=40, half=30, t=3, post=6):
+    # A roof held up by one corner post, so it overhangs (a roof spanning several posts
+    # would be bridged instead of supported).
+    roof = box(-half, -half, z, half, half, z + t)
+    return roof + box(half - post, half - post, 0, half, half, z)
+
+
+def fins_under_roof():
+    # Thin upright fins under a roof: branches from the roof have to thread down between
+    # them or land on their tops, and a branch that drifts sideways cuts through a fin.
+    parts = roof_on_post()
+    for k in range(-3, 4):
+        parts = parts + box(k * 7 - 0.6, -18, 0, k * 7 + 0.6, 18, 22)
+    return parts
+
+
+def leaning_fins_under_roof():
+    # Fins leaning 35 degrees under a roof: branches coming straight down meet their
+    # sloped faces from above and below.
+    parts = roof_on_post()
+    for k in range(-2, 3):
+        fin = box(-0.6, -18, 0, 0.6, 18, 26).rotate([0, 35, 0]).translate([k * 9 - 6, 0, 0])
+        parts = parts + (fin ^ box(-30, -30, 0, 30, 30, 30))
+    return parts
+
+
+def cup_under_roof():
+    # A thin walled open cup under a roof: branches must go around the rim or down inside.
+    cup = cyl(14, 24) - cyl(12.8, 24, z0=1.2)
+    return roof_on_post() + cup
+
+
+def table_with_rails():
+    # A table top on four legs with thin rails part way up between the legs, right
+    # under the top's edges, so branches from the edge meet a rail on the way down.
+    parts = roof_on_post()
+    for sy in (-1, 1):
+        parts = parts + box(-26, sy * 27 - 1, 24, 26, sy * 27 + 1, 27)
+    for sx in (-1, 1):
+        parts = parts + box(sx * 27 - 1, -26, 18, sx * 27 + 1, 26, 21)
+    return parts
+
+
 SHAPES = {
     'roof_over_dome': roof_over_dome,
     'mushroom_with_flange': mushroom_with_flange,
     'shelf_over_ramp': shelf_over_ramp,
     'stepped_overhangs': stepped_overhangs,
+    'fins_under_roof': fins_under_roof,
+    'leaning_fins_under_roof': leaning_fins_under_roof,
+    'cup_under_roof': cup_under_roof,
+    'table_with_rails': table_with_rails,
 }
 
 

@@ -32,6 +32,8 @@ int main(int argc, char **argv)
     Test::TestConfig config;
     config.print.items.opt("support_material").set(Domain::SupportMode::Everywhere);
     config.print.items.opt("support_material_style").set(Domain::SupportMaterialStyle::smsOrganic);
+    // The test config leaves the XY gap at 0, which makes tree support divide by zero.
+    config.print.items.opt("support_material_xy_spacing").set(Domain::FloatOrPercentage{0.3});
     if (argc > 3)
         config.print.items.opt("layer_height").set(std::atof(argv[3]));
 
