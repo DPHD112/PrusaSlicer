@@ -26,9 +26,10 @@ Slice each shape, then run the checker on the G-code:
 
 Environment variables, read while slicing (by `organic_check` or the slicer):
 
-- `PRUSASLICER_ORGANIC_STATS=1` prints how many branches ran into the part (and
-  had to be clipped), the clipped volume, and how many floating islands were
-  extended down or removed.
+- `PRUSASLICER_ORGANIC_STATS=1` prints how many branches came within the XY or Z
+  gap of the part and had to be clipped, and the clipped volume, both in total and
+  away from branch tips and roots (the second is branches running into the part on
+  their way down); plus how many floating islands were extended down or removed.
 - `PRUSASLICER_EXPORT_ORGANIC_STL=supports.stl` writes the support as it will be
   printed (final per-layer areas stacked into a solid), placed on the bed like the
   G-code, to import into another slicer next to the part. The mesh is closed apart

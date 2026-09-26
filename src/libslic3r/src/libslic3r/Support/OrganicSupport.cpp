@@ -1258,13 +1258,21 @@ struct OrganicStats {
     size_t     num_branches_clipped{ 0 };
     double     tube_volume{ 0 };
     double     clipped_volume{ 0 };
-    void add_branch(double volume, double clipped, double clipped_threshold) {
+    // Clipped away from the part of a branch between its tip and its root, not counting the
+    // tip poking into the overhang it holds or a root sitting on the part: these are branches
+    // running into the part on their way down.
+    size_t     num_branches_clipped_on_way{ 0 };
+    double     clipped_on_way_volume{ 0 };
+    void add_branch(double volume, double clipped, double clipped_on_way, double clipped_threshold) {
         std::lock_guard<std::mutex> lock(mutex);
         ++ num_branches;
         tube_volume    += volume;
         clipped_volume += clipped;
         if (clipped > clipped_threshold)
             ++ num_branches_clipped;
+        clipped_on_way_volume += clipped_on_way;
+        if (clipped_on_way > clipped_threshold)
+            ++ num_branches_clipped_on_way;
     }
 };
 } // namespace
@@ -1485,19 +1493,25 @@ void organic_draw_branches(
                     std::vector<Polygons> slices = slice_mesh(partial_mesh, slice_z, mesh_slicing_params, throw_on_cancel);
                     bottom_contacts.clear();
                     //FIXME parallelize?
-                    double tube_area = 0, clipped_area = 0;
+                    double tube_area = 0, clipped_area = 0, clipped_on_way_area = 0;
+                    // Layers next to a tip (with the top Z gap) and next to a root resting on the part.
+                    const LayerIndex tip_margin  = branch.has_tip ? LayerIndex(config.tip_layers + config.z_distance_top_layers + 2) : 0;
+                    const LayerIndex root_margin = branch.has_root && layer_begin > 0 ? LayerIndex(config.z_distance_bottom_layers + 2) : 0;
                     for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i) {
                         double area_before = print_stats ? Algorithms::Polygon::area(slices[i]) : 0;
                         slices[i] = diff_clipped(slices[i], volumes.getCollision(0, layer_begin + i, true)); //FIXME parent_uses_min || draw_area.element->state.use_min_xy_dist);
                         if (print_stats) {
+                            const double clipped = area_before - Algorithms::Polygon::area(slices[i]);
                             tube_area    += area_before;
-                            clipped_area += area_before - Algorithms::Polygon::area(slices[i]);
+                            clipped_area += clipped;
+                            if (i >= root_margin && i < LayerIndex(slices.size()) - tip_margin)
+                                clipped_on_way_area += clipped;
                         }
                     }
                     if (print_stats) {
                         // Scaled area to mm^3; a branch counts as clipped once it lost more than a 1 mm^2 layer's worth.
                         const double to_mm3 = SCALING_FACTOR * SCALING_FACTOR * config.layer_height * SCALING_FACTOR;
-                        stats.add_branch(tube_area * to_mm3, clipped_area * to_mm3, config.layer_height * SCALING_FACTOR);
+                        stats.add_branch(tube_area * to_mm3, clipped_area * to_mm3, clipped_on_way_area * to_mm3, config.layer_height * SCALING_FACTOR);
                     }
 
                     size_t num_empty = 0;
@@ -1630,6 +1644,9 @@ void organic_draw_branches(
     if (print_stats)
         std::fprintf(stderr, "organic-stats: branches %zu, clipped by object %zu, tube volume %.1f mm3, clipped volume %.2f mm3\n",
             stats.num_branches, stats.num_branches_clipped, stats.tube_volume, stats.clipped_volume);
+    if (print_stats)
+        std::fprintf(stderr, "organic-stats: away from tips and roots: branches clipped %zu, clipped volume %.2f mm3\n",
+            stats.num_branches_clipped_on_way, stats.clipped_on_way_volume);
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
         [&trees, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
