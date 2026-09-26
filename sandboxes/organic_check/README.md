@@ -26,6 +26,8 @@ Environment variables, read while slicing (by `organic_check` or the slicer):
   extended down or removed.
 - `PRUSASLICER_EXPORT_ORGANIC_STL=supports.stl` writes the support as it will be
   printed (final per-layer areas stacked into a solid), placed on the bed like the
-  G-code, to import into another slicer next to the part.
+  G-code, to import into another slicer next to the part. The mesh is closed apart
+  from a few hundred sliver edges out of several hundred thousand, which slicers
+  repair on import.
 - `PRUSASLICER_EXPORT_ORGANIC_TUBES_STL=tubes.stl` writes the raw smooth branch
   tubes before they are clipped against the part, for debugging.

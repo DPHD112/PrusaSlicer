@@ -13,12 +13,14 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <optional>
 #include <utility>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <unordered_map>
 #include <cstddef>
 
 #include "Slic3r/Biz/Algorithms/ExPolygon.hpp"
@@ -1100,6 +1102,153 @@ struct OrganicMeshExport {
     }
 };
 
+// slices_to_mesh() leaves T-junctions: a wall edge in a layer plane can meet a horizontal
+// face whose edge has an extra vertex in the middle, so both edges count as open and slicers
+// report the mesh as broken. Split each triangle at the vertices lying on its open edges,
+// which closes those cracks.
+static void its_split_t_junctions(indexed_triangle_set &its)
+{
+    // Vertices at the same position must share an index for the edges to match up. Points that
+    // came out of different polygon operations can differ in the last bit of a float, so merge
+    // vertices closer than merge_dist.
+    {
+        constexpr float merge_dist = 1e-4f;
+        auto cell_of = [](const stl_vertex &v) {
+            return std::array<int64_t, 3>{ int64_t(std::floor(v.x() / merge_dist)), int64_t(std::floor(v.y() / merge_dist)), int64_t(std::floor(v.z() / merge_dist)) };
+        };
+        struct CellHash { size_t operator()(const std::array<int64_t, 3> &c) const {
+            return size_t(c[0] * 73856093) ^ size_t(c[1] * 19349663) ^ size_t(c[2] * 83492791); } };
+        std::unordered_map<std::array<int64_t, 3>, std::vector<int>, CellHash> grid;
+        grid.reserve(its.vertices.size());
+        std::vector<int>        remap(its.vertices.size());
+        std::vector<stl_vertex> vertices;
+        for (size_t i = 0; i < its.vertices.size(); ++ i) {
+            const stl_vertex            &v    = its.vertices[i];
+            const std::array<int64_t, 3> cell = cell_of(v);
+            int                          found = -1;
+            for (int64_t dx = -1; dx <= 1 && found < 0; ++ dx)
+                for (int64_t dy = -1; dy <= 1 && found < 0; ++ dy)
+                    for (int64_t dz = -1; dz <= 1 && found < 0; ++ dz)
+                        if (auto it = grid.find({ cell[0] + dx, cell[1] + dy, cell[2] + dz }); it != grid.end())
+                            for (int j : it->second)
+                                if ((vertices[j] - v).squaredNorm() < merge_dist * merge_dist) {
+                                    found = j;
+                                    break;
+                                }
+            if (found < 0) {
+                found = int(vertices.size());
+                vertices.push_back(v);
+                grid[cell].push_back(found);
+            }
+            remap[i] = found;
+        }
+        for (stl_triangle_vertex_indices &f : its.indices)
+            for (int &v : f)
+                v = remap[v];
+        its.vertices = std::move(vertices);
+        // Drop triangles that collapsed.
+        its.indices.erase(std::remove_if(its.indices.begin(), its.indices.end(),
+            [](const stl_triangle_vertex_indices &f) { return f[0] == f[1] || f[1] == f[2] || f[2] == f[0]; }), its.indices.end());
+    }
+    auto edge_key = [](int a, int b) {
+        return a < b ? (uint64_t(uint32_t(a)) << 32) | uint32_t(b) : (uint64_t(uint32_t(b)) << 32) | uint32_t(a);
+    };
+    std::unordered_map<uint64_t, int> edge_count;
+    edge_count.reserve(its.indices.size() * 2);
+    for (const stl_triangle_vertex_indices &f : its.indices)
+        for (int i = 0; i < 3; ++ i)
+            ++ edge_count[edge_key(f[i], f[(i + 1) % 3])];
+
+    // Open edges and their end points, grouped by layer height. All the cracks are horizontal.
+    struct OpenEdge { int face; int edge; };
+    struct Level { std::vector<OpenEdge> edges; std::vector<int> vertices; };
+    std::map<float, Level> levels;
+    for (int face = 0; face < int(its.indices.size()); ++ face) {
+        const stl_triangle_vertex_indices &f = its.indices[face];
+        for (int i = 0; i < 3; ++ i) {
+            int a = f[i], b = f[(i + 1) % 3];
+            if (edge_count[edge_key(a, b)] != 1 || its.vertices[a].z() != its.vertices[b].z())
+                continue;
+            Level &level = levels[its.vertices[a].z()];
+            level.edges.push_back({ face, i });
+            level.vertices.push_back(a);
+            level.vertices.push_back(b);
+        }
+    }
+
+    constexpr float cell = 1.f;
+    constexpr float tol  = 2e-4f;
+    auto cell_key = [](int cx, int cy) { return (uint64_t(uint32_t(cx)) << 32) | uint32_t(cy); };
+    // Per face and per edge, the vertices lying on that edge as (position along it, vertex).
+    std::unordered_map<int, std::array<std::vector<std::pair<float, int>>, 3>> splits;
+    for (auto &[z, level] : levels) {
+        sort_remove_duplicates(level.vertices);
+        std::unordered_map<uint64_t, std::vector<int>> grid;
+        for (int v : level.vertices)
+            grid[cell_key(int(std::floor(its.vertices[v].x() / cell)), int(std::floor(its.vertices[v].y() / cell)))].push_back(v);
+        for (const OpenEdge &e : level.edges) {
+            const stl_triangle_vertex_indices &f = its.indices[e.face];
+            const int   a  = f[e.edge], b = f[(e.edge + 1) % 3];
+            const Vec2f pa = its.vertices[a].head<2>(), pb = its.vertices[b].head<2>();
+            const Vec2f d  = pb - pa;
+            const float l2 = d.squaredNorm();
+            if (l2 <= 0.f)
+                continue;
+            const Vec2f lo = pa.cwiseMin(pb) - Vec2f(tol, tol), hi = pa.cwiseMax(pb) + Vec2f(tol, tol);
+            for (int cx = int(std::floor(lo.x() / cell)); cx <= int(std::floor(hi.x() / cell)); ++ cx)
+                for (int cy = int(std::floor(lo.y() / cell)); cy <= int(std::floor(hi.y() / cell)); ++ cy)
+                    if (auto it = grid.find(cell_key(cx, cy)); it != grid.end())
+                        for (int c : it->second) {
+                            if (c == f[0] || c == f[1] || c == f[2])
+                                continue;
+                            const Vec2f pc = its.vertices[c].head<2>();
+                            const float t  = (pc - pa).dot(d) / l2;
+                            // Strictly inside the edge, not at (or next to) either end.
+                            const float t_min = tol / std::sqrt(l2);
+                            if (t > t_min && t < 1.f - t_min && (pa + t * d - pc).squaredNorm() < tol * tol)
+                                splits[e.face][e.edge].emplace_back(t, c);
+                        }
+        }
+    }
+
+    for (auto &[face, edges] : splits) {
+        const stl_triangle_vertex_indices f = its.indices[face];
+        // The triangle's outline with the split vertices inserted, in order.
+        std::vector<int> outline;
+        int num_split_edges = 0;
+        int split_edge      = 0;
+        for (int i = 0; i < 3; ++ i) {
+            outline.push_back(f[i]);
+            std::sort(edges[i].begin(), edges[i].end());
+            edges[i].erase(std::unique(edges[i].begin(), edges[i].end(),
+                [](const auto &l, const auto &r) { return l.second == r.second; }), edges[i].end());
+            for (const auto &[t, v] : edges[i])
+                outline.push_back(v);
+            if (! edges[i].empty()) {
+                ++ num_split_edges;
+                split_edge = i;
+            }
+        }
+        std::vector<stl_triangle_vertex_indices> fan;
+        if (num_split_edges == 1) {
+            // Fan from the corner opposite the split edge.
+            const int apex = f[(split_edge + 2) % 3];
+            auto it = std::find(outline.begin(), outline.end(), apex);
+            std::rotate(outline.begin(), it, outline.end());
+            for (size_t i = 1; i + 1 < outline.size(); ++ i)
+                fan.push_back({ apex, outline[i], outline[i + 1] });
+        } else {
+            // Fan from the centroid, so that no triangle is flat.
+            const int apex = int(its.vertices.size());
+            its.vertices.emplace_back((its.vertices[f[0]] + its.vertices[f[1]] + its.vertices[f[2]]) / 3.f);
+            for (size_t i = 0; i < outline.size(); ++ i)
+                fan.push_back({ apex, outline[i], outline[(i + 1) % outline.size()] });
+        }
+        its.indices[face] = fan.front();
+        its.indices.insert(its.indices.end(), fan.begin() + 1, fan.end());
+    }
+}
+
 // Organic support diagnostics (fork addition). When PRUSASLICER_ORGANIC_STATS is set,
 // report to stderr how much of the branch tubes had to be clipped away because they
 // ran into the object, and how many support islands were left with nothing under them.
@@ -1641,8 +1790,10 @@ void organic_draw_branches(
                 layers[layer_idx] = Algorithms::ExPolygon::simplify(union_ex(support_at(layer_idx)), scaled<double>(0.05));
                 grid[layer_idx]   = float(layer_z(slicing_params, config, layer_idx));
             }
+            indexed_triangle_set mesh = slices_to_mesh(layers, slicing_params.object_print_z_min, grid);
+            its_split_t_junctions(mesh);
             OrganicMeshExport support_export;
-            support_export.add(slices_to_mesh(layers, slicing_params.object_print_z_min, grid));
+            support_export.add(mesh);
             support_export.write(path, unscaled<double>(print_object.instances().front().shift()));
         }
         if (num_dropped > 0)
