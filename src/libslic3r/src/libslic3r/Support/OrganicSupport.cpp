@@ -26,6 +26,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/MutablePolygon.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
+#include "libslic3r/SlicesToTriangleMesh.hpp"
 #include "admesh/stl.h"
 #include "Slic3r/Biz/Algorithms/AABBTreeIndirect.hpp"
 #include "libslic3r/Line.hpp"
@@ -780,6 +781,8 @@ static void organic_smooth_branches_avoid_collisions(
         // 
         Vec3f                 last_collision;
         double                last_collision_depth;
+        // Sphere center was inside the object on the layer of last_collision.
+        bool                  last_collision_inside{ false };
         // Minimum Z for which the sphere collision will be evaluated.
         // Limited by the minimum sloping angle and by the bottom of the tree.
         float                 min_z{ -std::numeric_limits<float>::max() };
@@ -844,30 +847,41 @@ static void organic_smooth_branches_avoid_collisions(
     static constexpr const double max_nudge_collision_avoidance = 0.5;
     static constexpr const double max_nudge_smoothing = 0.2;
     static constexpr const size_t num_iter = 100; // 1000;
-    for (size_t iter = 0; iter < num_iter; ++ iter) {
+    // Extra iterations without smoothing, only pushing spheres out of the object,
+    // in case smoothing kept pulling some of them back in.
+    static constexpr const size_t num_iter_collision_only = 100;
+    for (size_t iter = 0; iter < num_iter + num_iter_collision_only; ++ iter) {
+        const bool smooth = iter < num_iter;
         // Back up prev position before Laplacian smoothing.
         for (CollisionSphere &collision_sphere : collision_spheres)
             collision_sphere.prev_position = collision_sphere.position;
         std::atomic<size_t> num_moved{ 0 };
         tbb::parallel_for(tbb::blocked_range<size_t>(0, collision_spheres.size()),
-            [&collision_spheres, &layer_collision_cache, &slicing_params, &config, &linear_data_layers, &num_moved, &throw_on_cancel](const tbb::blocked_range<size_t> range) {
+            [&collision_spheres, &layer_collision_cache, &slicing_params, &config, &linear_data_layers, &num_moved, &throw_on_cancel, smooth](const tbb::blocked_range<size_t> range) {
             for (size_t collision_sphere_id = range.begin(); collision_sphere_id < range.end(); ++ collision_sphere_id)
                 if (CollisionSphere &collision_sphere = collision_spheres[collision_sphere_id]; ! collision_sphere.locked) {
                     // Calculate collision of multiple 2D layers against a collision sphere.
                     collision_sphere.last_collision_depth = - std::numeric_limits<double>::max();
+                    const Vec2d center = to_2d(collision_sphere.position).cast<double>();
                     for (uint32_t layer_id = collision_sphere.layer_begin; layer_id != collision_sphere.layer_end; ++ layer_id) {
                         double dz = (layer_id - collision_sphere.element.state.layer_idx) * slicing_params.layer_height;
                         if (double r2 = sqr(collision_sphere.radius) - sqr(dz); r2 > 0) {
                             if (const LayerCollisionCache &layer_collision_cache_item = layer_collision_cache[layer_id]; ! layer_collision_cache_item.empty()) {
                                 size_t hit_idx_out;
                                 Vec2d  hit_point_out;
-                                if (double dist = sqrt(AABBTreeLines::squared_distance_to_indexed_lines(
-                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, Vec2d(to_2d(collision_sphere.position).cast<double>()),
-                                    hit_idx_out, hit_point_out, r2)); dist >= 0.) {
-                                    double collision_depth = sqrt(r2) - dist;
+                                // The distance query only sees the object's outline, so a sphere whose center sits
+                                // inside the object looked collision free (deeper than its radius) or got pushed further in.
+                                const bool inside = AABBTreeLines::point_outside_closed_contours(
+                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, center) < 0;
+                                double dist2 = AABBTreeLines::squared_distance_to_indexed_lines(
+                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, center,
+                                    hit_idx_out, hit_point_out, inside ? std::numeric_limits<double>::infinity() : r2);
+                                if (dist2 >= 0.) {
+                                    double collision_depth = inside ? sqrt(r2) + sqrt(dist2) : sqrt(r2) - sqrt(dist2);
                                     if (collision_depth > collision_sphere.last_collision_depth) {
-                                        collision_sphere.last_collision_depth = collision_depth;
-                                        collision_sphere.last_collision = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                        collision_sphere.last_collision_depth  = collision_depth;
+                                        collision_sphere.last_collision        = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                        collision_sphere.last_collision_inside = inside;
                                     }
                                 }
                             }
@@ -881,8 +895,19 @@ static void organic_smooth_branches_avoid_collisions(
                             ++ num_moved;
                         // Shift by maximum 2mm.
                         double nudge_dist = std::min(std::max(0., collision_sphere.last_collision_depth + collision_extra_gap), max_nudge_collision_avoidance);
-                        Vec2d nudge_vector = (to_2d(collision_sphere.position) - to_2d(collision_sphere.last_collision)).cast<double>().normalized() * nudge_dist;
-                        collision_sphere.position.head<2>() += (nudge_vector * nudge_dist).cast<float>();
+                        // Away from the outline when outside the object, towards it when inside.
+                        Vec2d away = center - to_2d(collision_sphere.last_collision).cast<double>();
+                        if (collision_sphere.last_collision_inside)
+                            away = - away;
+                        // The push used to be scaled by nudge_dist twice (0.01 mm for a 0.1 mm overlap),
+                        // so Laplacian smoothing below always pulled the sphere back into the object.
+                        if (double len = away.norm(); len > EPSILON)
+                            collision_sphere.position.head<2>() += (away * (nudge_dist / len)).cast<float>();
+                    }
+                    if (! smooth || collision_sphere.last_collision_depth > 0) {
+                        // Don't let smoothing drag a colliding sphere back into the object.
+                        throw_on_cancel();
+                        continue;
                     }
                     // Laplacian smoothing
                     Vec2d avg{ 0, 0 };
@@ -1034,9 +1059,11 @@ static void organic_smooth_branches_avoid_collisions(
 #endif // TREE_SUPPORT_ORGANIC_NUDGE_NEW
 
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
-// Organic support mesh export (fork addition). When PRUSASLICER_EXPORT_ORGANIC_STL
-// names a file, every branch tube extrude_branch() builds is also collected and
-// written there as a binary STL, in the print object's frame, before slicing.
+// Organic support mesh export (fork addition). PRUSASLICER_EXPORT_ORGANIC_STL names a
+// binary STL to receive the support as it will be printed: the final per-layer support
+// areas (after clipping against the object and fixing floating islands) stacked into a
+// solid, placed on the bed like the G-code. PRUSASLICER_EXPORT_ORGANIC_TUBES_STL receives
+// the raw smooth branch tubes before any clipping, for debugging.
 namespace {
 struct OrganicMeshExport {
     std::mutex                 mutex;
@@ -1272,7 +1299,7 @@ void organic_draw_branches(
     MeshSlicingParams mesh_slicing_params;
     mesh_slicing_params.mode = MeshSlicingParams::SlicingMode::Positive;
 
-    const char        *export_path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_STL");
+    const char        *export_path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_TUBES_STL");
     OrganicMeshExport  mesh_export;
     const bool         print_stats = std::getenv("PRUSASLICER_ORGANIC_STATS") != nullptr;
     OrganicStats       stats;
@@ -1489,21 +1516,39 @@ void organic_draw_branches(
     // Nothing may be printed on thin air. A branch clipped where it passes through
     // the object, or one whose descent got stuck, leaves support islands that start
     // mid-air; printed, they fall off or get knocked loose and crash the print.
-    // Walk up the layers and keep only islands that rest on the bed, on the object
-    // (placeable areas) or on support kept one layer below.
+    // Walk up the layers. An island that doesn't rest on the bed, on the object or on
+    // support one layer below gets a column dropped under it, down to whatever is below:
+    // the bed, the object (keeping the bottom Z gap) or support already standing. Only
+    // islands too small to matter, or ones that could only land on the object when
+    // support may not rest on it, are removed.
     {
+        if (slices.size() < top_contacts.size())
+            slices.resize(top_contacts.size());
         const size_t num_layers   = slices.size();
         const double min_overlap  = sqr(double(config.support_line_width));
         const float  touch        = float(0.5 * config.support_line_width);
-        Polygons     kept_below;
-        size_t       num_dropped  = 0;
+        const int    gap_layers   = int(config.z_distance_bottom_layers);
+        // Object at layer_idx plus the bottom Z gap above it: support may rest on top of this.
+        auto object_below = [&volumes, gap_layers](LayerIndex layer_idx) {
+            Polygons out;
+            for (LayerIndex i = std::max<LayerIndex>(0, layer_idx - gap_layers); i <= layer_idx; ++ i)
+                append(out, volumes.getCollision(0, i, false));
+            return union_(out);
+        };
+        auto support_at = [&slices, &top_contacts](size_t layer_idx) {
+            Polygons out = slices[layer_idx].polygons;
+            append(out, slices[layer_idx].bottom_contacts);
+            if (layer_idx < top_contacts.size() && top_contacts[layer_idx])
+                append(out, top_contacts[layer_idx]->polygons);
+            return out;
+        };
+        size_t num_extended = 0;
+        size_t num_dropped  = 0;
+        Polygons kept_below;
         for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
             Slice                 &slice = slices[layer_idx];
             SupportGeneratorLayer *top   = layer_idx < top_contacts.size() ? top_contacts[layer_idx] : nullptr;
-            Polygons all = slice.polygons;
-            append(all, slice.bottom_contacts);
-            if (top)
-                append(all, top->polygons);
+            Polygons all = support_at(layer_idx);
             if (all.empty()) {
                 kept_below.clear();
                 continue;
@@ -1513,16 +1558,49 @@ void organic_draw_branches(
                 continue;
             }
             Polygons below = kept_below;
-            append(below, volumes.getPlaceableAreas(0, LayerIndex(layer_idx), throw_on_cancel));
+            append(below, object_below(LayerIndex(layer_idx) - 1));
             below = expand(union_(below), touch);
             Polygons kept;
             for (ExPolygon &island : union_ex(all)) {
-                double island_area = Algorithms::ExPolygon::area(island);
-                double held        = Algorithms::Polygon::area(intersection(Algorithms::ExPolygon::to_polygons(island), below));
-                if (held >= std::min(min_overlap, 0.5 * island_area))
-                    append(kept, Algorithms::ExPolygon::to_polygons(std::move(island)));
-                else
+                Polygons island_polygons = Algorithms::ExPolygon::to_polygons(std::move(island));
+                double   island_area     = Algorithms::Polygon::area(island_polygons);
+                double   held            = Algorithms::Polygon::area(intersection(island_polygons, below));
+                if (held >= std::min(min_overlap, 0.5 * island_area)) {
+                    append(kept, std::move(island_polygons));
+                    continue;
+                }
+                // Floating. Drop a column under it, layer by layer, until it lands on something.
+                std::vector<Polygons> column;
+                Polygons              col       = island_polygons;
+                bool                  on_object = false;
+                for (LayerIndex l = LayerIndex(layer_idx) - 1; l >= 0; -- l) {
+                    // Part of the column above the object (with the Z gap) rests there and stops.
+                    Polygons next = diff(col, object_below(l));
+                    if (Algorithms::Polygon::area(next) < Algorithms::Polygon::area(col) - EPSILON)
+                        on_object = true;
+                    col = std::move(next);
+                    if (Algorithms::Polygon::area(col) < min_overlap)
+                        break;
+                    // Landed on support already standing at this layer.
+                    Polygons existing = support_at(size_t(l));
+                    double   area     = Algorithms::Polygon::area(col);
+                    if (Algorithms::Polygon::area(intersection(col, existing)) >= std::min(min_overlap, 0.5 * area))
+                        break;
+                    column.emplace_back(col);
+                    if (l == 0)
+                        break;
+                }
+                if (island_area < 2. * min_overlap || (on_object && ! config.support_rests_on_model)) {
                     ++ num_dropped;
+                    continue;
+                }
+                for (size_t i = 0; i < column.size(); ++ i) {
+                    Slice &dst = slices[layer_idx - 1 - i];
+                    append(dst.polygons, std::move(column[i]));
+                    dst.polygons = union_(dst.polygons);
+                }
+                ++ num_extended;
+                append(kept, std::move(island_polygons));
             }
             if (kept.empty()) {
                 slice.polygons.clear();
@@ -1539,7 +1617,18 @@ void organic_draw_branches(
             throw_on_cancel();
         }
         if (print_stats)
-            std::fprintf(stderr, "organic-stats: floating islands removed %zu\n", num_dropped);
+            std::fprintf(stderr, "organic-stats: floating islands extended down %zu, removed %zu\n", num_extended, num_dropped);
+        if (const char *path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_STL"); path && num_layers > 0) {
+            std::vector<ExPolygons> layers(num_layers);
+            std::vector<float>      grid(num_layers);
+            for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
+                layers[layer_idx] = union_ex(support_at(layer_idx));
+                grid[layer_idx]   = float(layer_z(slicing_params, config, layer_idx));
+            }
+            OrganicMeshExport support_export;
+            support_export.add(slices_to_mesh(layers, slicing_params.object_print_z_min, grid));
+            support_export.write(path, unscaled<double>(print_object.instances().front().shift()));
+        }
         if (num_dropped > 0)
             SPDLOG_WARN("Organic supports: removed {} support islands with nothing under them; the overhangs they held are unsupported.", num_dropped);
     }
