@@ -65,17 +65,26 @@ def parse(path):
 
 
 def rasterize(segments, origin, shape, px, support_only):
+    """Mark every pixel within half a line width (as a square) of the sampled extrusion paths."""
     grid = np.zeros(shape, bool)
-    ox, oy = origin
-    for x0, y0, x1, y1, w, sup in segments:
-        if support_only and not sup:
-            continue
-        n = max(2, int(np.hypot(x1 - x0, y1 - y0) / (px * 0.5)) + 1)
-        xs = np.linspace(x0, x1, n)
-        ys = np.linspace(y0, y1, n)
-        r = max(1, int(round(w / (2 * px))))
-        for cx, cy in zip(((xs - ox) / px).astype(int), ((ys - oy) / px).astype(int)):
-            grid[max(cy - r, 0):cy + r + 1, max(cx - r, 0):cx + r + 1] = True
+    seg = np.array([s[:5] for s in segments if s[5] or not support_only], float).reshape(-1, 5)
+    if len(seg) == 0:
+        return grid
+    x0, y0, x1, y1, w = seg.T
+    # Sample each segment every half pixel.
+    n = np.maximum(2, (np.hypot(x1 - x0, y1 - y0) / (px * 0.5)).astype(int) + 1)
+    idx = np.repeat(np.arange(len(seg)), n)
+    starts = np.cumsum(n) - n
+    t = (np.arange(n.sum()) - np.repeat(starts, n)) / np.repeat(n - 1, n)
+    cx = ((x0[idx] + t * (x1 - x0)[idx] - origin[0]) / px).astype(int)
+    cy = ((y0[idx] + t * (y1 - y0)[idx] - origin[1]) / px).astype(int)
+    r = np.maximum(1, np.round(w / (2 * px)).astype(int))[idx]
+    inside = (cx >= 0) & (cx < shape[1]) & (cy >= 0) & (cy < shape[0])
+    for radius in np.unique(r[inside]):
+        sel = inside & (r == radius)
+        centers = np.zeros(shape, bool)
+        centers[cy[sel], cx[sel]] = True
+        grid |= ndimage.maximum_filter(centers, size=2 * int(radius) + 1)
     return grid
 
 
@@ -106,38 +115,60 @@ def main():
 
     def close_gaps(grid):
         # Morphological closing with a disk, done with distance transforms (much faster than
-        # binary_closing with a large structuring element).
-        grown = ndimage.distance_transform_edt(~grid) <= closing_r
-        return ndimage.distance_transform_edt(grown) > closing_r
+        # binary_closing with a large structuring element), on the support's bounding box only.
+        ys, xs = np.nonzero(grid)
+        pad = int(np.ceil(closing_r)) + 2
+        y0, y1 = max(ys.min() - pad, 0), min(ys.max() + pad + 1, grid.shape[0])
+        x0, x1 = max(xs.min() - pad, 0), min(xs.max() + pad + 1, grid.shape[1])
+        crop = grid[y0:y1, x0:x1]
+        grown = ndimage.distance_transform_edt(~crop) <= closing_r
+        out = np.zeros_like(grid)
+        out[y0:y1, x0:x1] = ndimage.distance_transform_edt(grown) > closing_r
+        return out
     floating = []
     n_support_layers = 0
+    support_rasters = {}
+
+    def closed_support(zb):
+        # Only needed for islands that look unheld, so computed on demand.
+        if zb not in support_grids:
+            sup_b = support_rasters[zb]
+            support_grids[zb] = close_gaps(sup_b) if sup_b.any() else sup_b
+        return support_grids[zb]
+
     for z in zs:
         all_grids[z] = rasterize(layers[z], origin, shape, args.px, support_only=False)
         sup = rasterize(layers[z], origin, shape, args.px, support_only=True)
-        # Support printed as sparse lines holds up the layer above across the gaps between them.
-        support_grids[z] = close_gaps(sup) if sup.any() else sup
+        support_rasters[z] = sup
         if not sup.any():
             continue
         n_support_layers += 1
         if z <= first_z + 1e-6:
             continue  # on the bed
+        window = [zb for zb in zs if z - args.below - 1e-6 <= zb < z - 1e-6]
         below = np.zeros(shape, bool)
-        for zb in zs:
-            if z - args.below - 1e-6 <= zb < z - 1e-6:
-                below |= all_grids[zb] | support_grids[zb]
+        for zb in window:
+            below |= all_grids[zb]
         below = ndimage.binary_dilation(below, iterations=1)
         labels, n = ndimage.label(sup)
         if n == 0:
             continue
-        idx = np.arange(1, n + 1)
-        sizes = ndimage.sum(np.ones_like(labels), labels, idx)
-        held = ndimage.sum(below, labels, idx)
-        for i, size, h in zip(idx, sizes, held):
-            area = size * args.px ** 2
-            if area < args.min_area or h / size >= args.min_held:
+        sizes = np.bincount(labels.ravel(), minlength=n + 1)
+        held = np.bincount(labels.ravel(), weights=below.ravel(), minlength=n + 1)
+        suspects = [i for i in range(1, n + 1)
+                    if sizes[i] * args.px ** 2 >= args.min_area and held[i] / sizes[i] < args.min_held]
+        if not suspects:
+            continue
+        # Support printed as sparse lines holds up the layer above across the gaps between them.
+        for zb in window:
+            below |= ndimage.binary_dilation(closed_support(zb), iterations=1)
+        held = np.bincount(labels.ravel(), weights=below.ravel(), minlength=n + 1)
+        for i in suspects:
+            size, h = sizes[i], held[i]
+            if h / size >= args.min_held:
                 continue
             cy, cx = ndimage.center_of_mass(labels == i)
-            floating.append((z, origin[0] + cx * args.px, origin[1] + cy * args.px, area, h / size))
+            floating.append((z, origin[0] + cx * args.px, origin[1] + cy * args.px, size * args.px ** 2, h / size))
 
     print(f'{args.gcode}: {len(zs)} layers, {n_support_layers} with support')
     if not floating:

@@ -6,6 +6,9 @@ down and come out as solid trees, with no islands starting in mid-air.
 - `test_shapes.py OUTDIR` writes test parts that force branches to route around
   lower features of the same part (roof over a dome, mushroom with a flange,
   shelf over a ramp, stepped arms).
+- `random_shapes.py OUTDIR [COUNT] [SEED]` writes seeded random figurine-like parts
+  (a trunk with arms, blobs and plates, and thin pillars and fins under them) for
+  hunting failures on shapes nobody designed.
 - `organic_check part.stl part.gcode [layer_height] [key=value ...]` slices one STL
   with organic supports and default settings, without the GUI. `key=value` changes
   a print setting, such as `support_material_threshold=55` or
