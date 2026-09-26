@@ -1,0 +1,61 @@
+# Builds a Windows PrusaSlicer from this branch for testing the organic support fixes.
+# The zip of the app is attached to the workflow run as an artifact.
+name: Organic supports Windows build
+
+on:
+  push:
+    branches: [organic-windows-build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: deps/build/destdir
+          key: deps-win-${{ hashFiles('deps/CMakeLists.txt', 'deps/**/*.cmake') }}
+
+      - name: Build dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cmake -S deps -B deps/build -G "Visual Studio 17 2022" -A x64 -DPrusaSlicer_deps_PACKAGE_EXCLUDES="OCCT|z3"
+          cmake --build deps/build --config Release --parallel
+
+      - name: Save dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps/build/destdir
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: Configure PrusaSlicer
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH="$PWD/deps/build/destdir/usr/local"
+          -DSLIC3R_BUILD_TESTS=OFF -DSLIC3R_ENABLE_FORMAT_STEP=OFF -DSLIC3R_ENABLE_WEBKIT=OFF
+
+      - name: Build PrusaSlicer
+        shell: pwsh
+        run: cmake --build build --config Release --target slic3r-app-launcher --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "PrusaSlicer-organic"
+          New-Item -ItemType Directory $out | Out-Null
+          Get-ChildItem build/src/slic3r-app-launcher/Release -Exclude resources | Copy-Item -Destination $out -Recurse
+          Copy-Item resources -Destination "$out/resources" -Recurse
+          Get-ChildItem $out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PrusaSlicer-organic-windows
+          path: PrusaSlicer-organic
