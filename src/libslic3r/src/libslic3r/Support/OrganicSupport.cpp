@@ -1068,6 +1068,25 @@ struct OrganicMeshExport {
         std::fclose(f);
     }
 };
+
+// Organic support diagnostics (fork addition). When PRUSASLICER_ORGANIC_STATS is set,
+// report to stderr how much of the branch tubes had to be clipped away because they
+// ran into the object, and how many support islands were left with nothing under them.
+struct OrganicStats {
+    std::mutex mutex;
+    size_t     num_branches{ 0 };
+    size_t     num_branches_clipped{ 0 };
+    double     tube_volume{ 0 };
+    double     clipped_volume{ 0 };
+    void add_branch(double volume, double clipped, double clipped_threshold) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++ num_branches;
+        tube_volume    += volume;
+        clipped_volume += clipped;
+        if (clipped > clipped_threshold)
+            ++ num_branches_clipped;
+    }
+};
 } // namespace
 
 void organic_draw_branches(
@@ -1255,9 +1274,11 @@ void organic_draw_branches(
 
     const char        *export_path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_STL");
     OrganicMeshExport  mesh_export;
+    const bool         print_stats = std::getenv("PRUSASLICER_ORGANIC_STATS") != nullptr;
+    OrganicStats       stats;
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
-        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel, export_path, &mesh_export](const tbb::blocked_range<size_t> &range) {
+        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel, export_path, &mesh_export, print_stats, &stats](const tbb::blocked_range<size_t> &range) {
             indexed_triangle_set    partial_mesh;
             std::vector<float>      slice_z;
             std::vector<Polygons>   bottom_contacts;
@@ -1284,8 +1305,20 @@ void organic_draw_branches(
                     std::vector<Polygons> slices = slice_mesh(partial_mesh, slice_z, mesh_slicing_params, throw_on_cancel);
                     bottom_contacts.clear();
                     //FIXME parallelize?
-                    for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i)
+                    double tube_area = 0, clipped_area = 0;
+                    for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i) {
+                        double area_before = print_stats ? Algorithms::Polygon::area(slices[i]) : 0;
                         slices[i] = diff_clipped(slices[i], volumes.getCollision(0, layer_begin + i, true)); //FIXME parent_uses_min || draw_area.element->state.use_min_xy_dist);
+                        if (print_stats) {
+                            tube_area    += area_before;
+                            clipped_area += area_before - Algorithms::Polygon::area(slices[i]);
+                        }
+                    }
+                    if (print_stats) {
+                        // Scaled area to mm^3; a branch counts as clipped once it lost more than a 1 mm^2 layer's worth.
+                        const double to_mm3 = SCALING_FACTOR * SCALING_FACTOR * config.layer_height * SCALING_FACTOR;
+                        stats.add_branch(tube_area * to_mm3, clipped_area * to_mm3, config.layer_height * SCALING_FACTOR);
+                    }
 
                     size_t num_empty = 0;
                     if (slices.front().empty()) {
@@ -1414,6 +1447,9 @@ void organic_draw_branches(
     if (export_path)
         // Branch tubes are in the object's frame; shift to the first instance's bed position.
         mesh_export.write(export_path, unscaled<double>(print_object.instances().front().shift()));
+    if (print_stats)
+        std::fprintf(stderr, "organic-stats: branches %zu, clipped by object %zu, tube volume %.1f mm3, clipped volume %.2f mm3\n",
+            stats.num_branches, stats.num_branches_clipped, stats.tube_volume, stats.clipped_volume);
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
         [&trees, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
@@ -1502,6 +1538,8 @@ void organic_draw_branches(
             kept_below = std::move(kept);
             throw_on_cancel();
         }
+        if (print_stats)
+            std::fprintf(stderr, "organic-stats: floating islands removed %zu\n", num_dropped);
         if (num_dropped > 0)
             SPDLOG_WARN("Organic supports: removed {} support islands with nothing under them; the overhangs they held are unsupported.", num_dropped);
     }
