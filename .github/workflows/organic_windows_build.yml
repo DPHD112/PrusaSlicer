@@ -52,7 +52,7 @@ jobs:
         run: |
           $out = "PrusaSlicer-organic"
           New-Item -ItemType Directory $out | Out-Null
-          Get-ChildItem build/src/slic3r-app-launcher/Release -Exclude resources | Copy-Item -Destination $out -Recurse
+          Get-ChildItem build/src/slic3r-app-launcher/Release -Exclude resources,*.pdb,*.lib,*.exp | Copy-Item -Destination $out -Recurse
           Copy-Item resources -Destination "$out/resources" -Recurse
           Get-ChildItem $out
 
