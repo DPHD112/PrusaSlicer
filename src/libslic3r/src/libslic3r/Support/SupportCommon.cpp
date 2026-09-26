@@ -1566,7 +1566,8 @@ void generate_support_toolpaths(
     const SupportGeneratorLayersPtr     &top_contacts,
     const SupportGeneratorLayersPtr     &intermediate_layers,
     const SupportGeneratorLayersPtr     &interface_layers,
-    const SupportGeneratorLayersPtr     &base_interface_layers)
+    const SupportGeneratorLayersPtr     &base_interface_layers,
+    const SupportGeneratorLayersPtr     &thick_base_layers)
 {
     // loop_interface_processor with a given circle radius.
     LoopInterfaceProcessor loop_interface_processor(1.5 * support_params.support_material_interface_flow.scaled_width());
@@ -1732,10 +1733,11 @@ void generate_support_toolpaths(
         SupportGeneratorLayerExtruded                                     base_layer;
         SupportGeneratorLayerExtruded                                     interface_layer;
         SupportGeneratorLayerExtruded                                     base_interface_layer;
-        boost::container::static_vector<LayerCacheItem, 5>  nonempty;
+        SupportGeneratorLayerExtruded                                     thick_base_layer;
+        boost::container::static_vector<LayerCacheItem, 6>  nonempty;
 
         void add_nonempty_and_sort() {
-            for (SupportGeneratorLayerExtruded *item : { &bottom_contact_layer, &top_contact_layer, &interface_layer, &base_interface_layer, &base_layer })
+            for (SupportGeneratorLayerExtruded *item : { &bottom_contact_layer, &top_contact_layer, &interface_layer, &base_interface_layer, &base_layer, &thick_base_layer })
                 if (! item->empty())
                     this->nonempty.emplace_back(item);
             // Sort the layers with the same print_z coordinate by their heights, thickest first.
@@ -1745,7 +1747,7 @@ void generate_support_toolpaths(
     std::vector<LayerCache>             layer_caches(support_layers.size());
 
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
-        [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts, &intermediate_layers, &interface_layers, &base_interface_layers, &layer_caches, &loop_interface_processor,
+        [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts, &intermediate_layers, &interface_layers, &base_interface_layers, &thick_base_layers, &layer_caches, &loop_interface_processor,
             &bbox_object, &angles, n_raft_layers, link_max_length_factor]
             (const tbb::blocked_range<size_t>& range) {
         // Indices of the 1st layer in their respective container at the support layer height.
@@ -1754,6 +1756,7 @@ void generate_support_toolpaths(
         size_t idx_layer_intermediate     = size_t(-1);
         size_t idx_layer_interface        = size_t(-1);
         size_t idx_layer_base_interface   = size_t(-1);
+        size_t idx_layer_thick_base       = size_t(-1);
         const auto fill_type_first_layer  = Domain::InfillPattern::ipRectilinear;
         auto filler_interface       = std::unique_ptr<Fill>(Fill::new_from_type(support_params.contact_fill_pattern));
         // Filler for the 1st layer interface, if different from filler_interface.
@@ -1790,6 +1793,7 @@ void generate_support_toolpaths(
             SupportGeneratorLayerExtruded &base_layer           = layer_cache.base_layer;
             SupportGeneratorLayerExtruded &interface_layer      = layer_cache.interface_layer;
             SupportGeneratorLayerExtruded &base_interface_layer = layer_cache.base_interface_layer;
+            SupportGeneratorLayerExtruded &thick_base_layer     = layer_cache.thick_base_layer;
             // Increment the layer indices to find a layer at support_layer.print_z.
             {
                 auto fun = [&support_layer](const SupportGeneratorLayer *l){ return l->print_z >= support_layer.print_z - EPSILON; };
@@ -1798,6 +1802,7 @@ void generate_support_toolpaths(
                 idx_layer_intermediate    = idx_higher_or_equal(intermediate_layers, idx_layer_intermediate,    fun);
                 idx_layer_interface       = idx_higher_or_equal(interface_layers,    idx_layer_interface,       fun);
                 idx_layer_base_interface  = idx_higher_or_equal(base_interface_layers, idx_layer_base_interface,fun);
+                idx_layer_thick_base      = idx_higher_or_equal(thick_base_layers,   idx_layer_thick_base,      fun);
             }
             // Copy polygons from the layers.
             if (idx_layer_bottom_contact < bottom_contacts.size() && bottom_contacts[idx_layer_bottom_contact]->print_z < support_layer.print_z + EPSILON)
@@ -1810,6 +1815,8 @@ void generate_support_toolpaths(
                 base_interface_layer.layer = base_interface_layers[idx_layer_base_interface];
             if (idx_layer_intermediate < intermediate_layers.size() && intermediate_layers[idx_layer_intermediate]->print_z < support_layer.print_z + EPSILON)
                 base_layer.layer = intermediate_layers[idx_layer_intermediate];
+            if (idx_layer_thick_base < thick_base_layers.size() && thick_base_layers[idx_layer_thick_base]->print_z < support_layer.print_z + EPSILON)
+                thick_base_layer.layer = thick_base_layers[idx_layer_thick_base];
 
             // This layer is a raft contact layer. Any contact polygons at this layer are raft contacts.
             bool raft_layer = slicing_params.interface_raft_layers && top_contact_layer.layer && is_approx(top_contact_layer.layer->print_z, slicing_params.raft_contact_top_z);
@@ -1962,6 +1969,13 @@ void generate_support_toolpaths(
                         sheath, no_sort, support_params.prefer_clockwise_movements);
             }
 
+            // Organic tree trunks printed with thicker layers than the base.
+            if (! thick_base_layer.empty() && ! thick_base_layer.polygons_to_extrude().empty()) {
+                assert(! thick_base_layer.layer->bridging);
+                tree_supports_generate_paths(thick_base_layer.extrusions, thick_base_layer.polygons_to_extrude(),
+                    support_params.support_material_flow.with_height(float(thick_base_layer.layer->height)), support_params);
+            }
+
             // Merge base_interface_layers to base_layers to avoid unneccessary retractions
             if (! base_layer.empty() && ! base_interface_layer.empty() && ! base_layer.polygons_to_extrude().empty() && ! base_interface_layer.polygons_to_extrude().empty() &&
                 base_layer.could_merge(base_interface_layer))
@@ -1991,7 +2005,10 @@ void generate_support_toolpaths(
                     for (int i = int(idx_top) - 1; i >= 0 && layers[i]->print_z > bottom_z; -- i)
                         layer_cache_item.overlapping.push_back(layers[i]);
                 };
-                add_overlapping(top_contacts, idx_layer_top_contact);
+                // Thick trunk layers keep clear of the contact layers they overlap in Z, and their tubes are loops,
+                // which modulate_extrusion_by_overlapping_layers() does not handle.
+                if (layer_cache_item.layer_extruded != &thick_base_layer)
+                    add_overlapping(top_contacts, idx_layer_top_contact);
                 if (layer_cache_item.layer_extruded->layer->layer_type == SupporLayerType::BottomContact) {
                     // Bottom contact layer may overlap with a base layer, which may be changed to interface layer.
                     add_overlapping(intermediate_layers,   idx_layer_intermediate);

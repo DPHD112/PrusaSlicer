@@ -1,0 +1,5 @@
+if (NOT TARGET prusa_fdm_mixer::prusa_fdm_mixer)
+    add_library(prusa_fdm_mixer::prusa_fdm_mixer INTERFACE IMPORTED)
+    set_target_properties(prusa_fdm_mixer::prusa_fdm_mixer PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/../../../include")
+endif()
+set(prusa_fdm_mixer_FOUND TRUE)

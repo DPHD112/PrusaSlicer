@@ -3424,6 +3424,204 @@ static void draw_areas(
 extern bool g_showed_critical_error;
 extern bool g_showed_performance_warning;
 
+// Organic supports may print their trunks with thicker layers than the object, for example 0.3 mm trunks next to 0.2 mm
+// object layers, while the top of every branch keeps the object layer height, so that the tips still land at the same gap
+// below the object.
+//
+// The object layers are grouped into blocks of m layers, which n thick layers span exactly (m = 3 and n = 2 for 0.2 mm
+// object layers and 0.3 mm trunk layers), so the two layer grids meet at the block boundaries. Within a block, each island
+// of the support is printed either with the object layers, or with the thick layers if it is part of a trunk: it stands
+// on support below the block, it leans no more than the preferred branch angle, all of it continues upwards through
+// the block and for another tip_layers + 2 layers above it, no interface or contact layer comes near it in the block
+// or in these layers above it, and the object is not right above it in these layers, nor within the top contact
+// distance above them. The last condition keeps the fine layers below the object also where a branch runs just below
+// a sloped overhang, away from its own tip.
+// The trunk islands are removed from the intermediate layers and returned as new thick layers, sorted by print_z.
+static SupportGeneratorLayersPtr organic_thick_trunk_layers(
+    const PrintObject                                    &print_object,
+    const TreeSupportSettings                            &config,
+    const double                                          trunk_layer_height,
+    // Sorted by print_z, without nullptrs. Trunk islands are removed from these layers.
+    const SupportGeneratorLayersPtr                      &intermediate_layers,
+    // Interfaces and contacts. Trunks keep away from them.
+    std::initializer_list<const SupportGeneratorLayersPtr*> other_layers,
+    SupportGeneratorLayerStorage                         &layer_storage,
+    std::function<void()>                                 throw_on_cancel)
+{
+    const SlicingParameters  &slicing_params = print_object.slicing_parameters();
+    const double              h              = slicing_params.layer_height;
+    SupportGeneratorLayersPtr out;
+    if (h < EPSILON || slicing_params.soluble_interface)
+        return out;
+    // Tree support layers follow a constant layer height (see layer_z()), so leave objects with variable layer height alone.
+    for (size_t i = 1; i < print_object.layer_count(); ++ i)
+        if (std::abs(print_object.get_layer(i)->height - h) > EPSILON)
+            return out;
+
+    // The thickest trunk layer height H = m * h / n, which exceeds neither the requested height
+    // nor the maximum layer height of the support extruder.
+    const double H_max = std::min(trunk_layer_height,
+        slicing_params.max_suport_layer_height > EPSILON ? slicing_params.max_suport_layer_height : trunk_layer_height) + EPSILON;
+    size_t m = 0;
+    size_t n = 0;
+    double H = 0;
+    for (size_t mm = 2; mm <= 8; ++ mm)
+        for (size_t nn = 1; nn < mm; ++ nn)
+            if (const double HH = double(mm) * h / double(nn); HH < H_max && HH > H + EPSILON) {
+                m = mm;
+                n = nn;
+                H = HH;
+            }
+    if (m == 0)
+        return out;
+
+    // Layers are indexed the same way as layer_idx of the tree support, raft layers included.
+    const LayerIndex first_object_layer = LayerIndex(config.raft_layers.size());
+    const double     first_object_z     = layer_z(slicing_params, config, first_object_layer);
+    auto             layer_index        = [&](double print_z) { return first_object_layer + LayerIndex(std::lround((print_z - first_object_z) / h)); };
+
+    // Base layers and the polygons of interfaces and contacts, indexed by layer.
+    std::vector<SupportGeneratorLayer*> base;
+    for (SupportGeneratorLayer *layer : intermediate_layers)
+        if (layer->print_z > first_object_z - EPSILON)
+            if (const LayerIndex idx = layer_index(layer->print_z); std::abs(layer_z(slicing_params, config, idx) - layer->print_z) < 0.25 * h) {
+                if (idx >= LayerIndex(base.size()))
+                    base.resize(idx + 1, nullptr);
+                base[idx] = layer;
+            }
+    const LayerIndex num_layers = LayerIndex(base.size());
+    if (num_layers <= first_object_layer + LayerIndex(m))
+        return out;
+    std::vector<Polygons> others(num_layers);
+    for (const SupportGeneratorLayersPtr *layers : other_layers)
+        for (const SupportGeneratorLayer *layer : *layers)
+            if (layer != nullptr && ! layer->polygons.empty() && layer->print_z > first_object_z - EPSILON)
+                // Mark all layers overlapping this layer in Z, plus the one below.
+                for (LayerIndex idx = std::max(first_object_layer, layer_index(layer->print_z - layer->height) - 1);
+                     idx <= std::min(num_layers - 1, layer_index(layer->print_z)); ++ idx)
+                    append(others[idx], layer->polygons);
+
+    const LayerIndex tip_layers = LayerIndex(config.tip_layers) + 2;
+    // How far a branch may move sideways per layer, and how far a trunk may lean over one block.
+    const coord_t    max_move   = std::min<coord_t>(config.maximum_move_distance, scaled<coord_t>(1.)) + scaled<coord_t>(0.02);
+    const coord_t    max_lean   = std::min<coord_t>(config.maximum_move_distance_slow, scaled<coord_t>(1.)) * coord_t(m) + scaled<coord_t>(0.02);
+    // Differences smaller than this are rounding noise.
+    const double     area_eps   = sqr(scaled<double>(0.2));
+
+    // Parts of the base at layer_idx, from which the support continues upwards for another num_layers_up layers.
+    auto continues_up = [&](LayerIndex layer_idx, LayerIndex num_layers_up) -> Polygons {
+        if (layer_idx + num_layers_up >= num_layers || base[layer_idx + num_layers_up] == nullptr)
+            return {};
+        Polygons area = base[layer_idx + num_layers_up]->polygons;
+        for (LayerIndex idx = layer_idx + num_layers_up - 1; idx >= layer_idx && ! area.empty(); -- idx)
+            area = base[idx] == nullptr ? Polygons{} : intersection(base[idx]->polygons, expand(area, float(max_move)));
+        return area;
+    };
+
+    // Block block_idx spans the layers below + 1 to below + m, where below = first_object_layer + block_idx * m.
+    const size_t          num_blocks = size_t(num_layers - 1 - first_object_layer) / m;
+    std::vector<Polygons> trunks(num_blocks);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_blocks), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t block_idx = range.begin(); block_idx < range.end(); ++ block_idx) {
+            throw_on_cancel();
+            const LayerIndex below = first_object_layer + LayerIndex(block_idx * m);
+            const LayerIndex top   = below + LayerIndex(m);
+            if (base[below] == nullptr || base[below]->polygons.empty() || base[top] == nullptr || base[top]->polygons.empty())
+                continue;
+            Polygons block;
+            // Parts of the block's layers which do not continue into the layer above.
+            Polygons ends;
+            for (LayerIndex idx = below + 1; idx <= top; ++ idx)
+                if (base[idx] != nullptr && ! base[idx]->polygons.empty()) {
+                    append(block, base[idx]->polygons);
+                    append(ends, idx + 1 < num_layers && base[idx + 1] != nullptr ?
+                        diff(base[idx]->polygons, expand(base[idx + 1]->polygons, float(max_move))) :
+                        base[idx]->polygons);
+                }
+            // Support below the block, widened by how far a trunk may lean over the block.
+            const Polygons supported = expand(base[below]->polygons, float(max_lean));
+            // Parts of the block's top layer, which continue upwards for another tip_layers.
+            const Polygons deep      = expand(continues_up(top, tip_layers), float(scaled<coord_t>(0.02)));
+            // Interfaces and contacts in the block and in the tip layers above it.
+            Polygons       near;
+            for (LayerIndex idx = below; idx <= std::min(top + tip_layers, num_layers - 1); ++ idx)
+                append(near, others[idx]);
+            if (! near.empty())
+                near = expand(near, float(max_move));
+            // The object right above the block, up to the top contact distance above the tip layers. A branch may run just
+            // below a sloped overhang, which it supports along its side, without an interface there and far from its own tip.
+            Polygons object_above;
+            for (LayerIndex idx = top + 1; idx <= top + tip_layers + LayerIndex(config.z_distance_top_layers); ++ idx)
+                if (const size_t object_layer_idx = size_t(idx - first_object_layer); object_layer_idx < print_object.layer_count())
+                    append(object_above, Algorithms::ExPolygon::to_polygons(print_object.get_layer(object_layer_idx)->lslices));
+            for (const ExPolygon &island : union_ex(block))
+                if (Algorithms::ExPolygon::area(diff_ex(island, supported)) < area_eps &&
+                    (ends.empty() || Algorithms::ExPolygon::area(intersection_ex(island, ends)) < area_eps) &&
+                    (near.empty() || intersection_ex(island, near).empty()) &&
+                    (object_above.empty() || Algorithms::ExPolygon::area(intersection_ex(island, object_above)) < area_eps)) {
+                    const ExPolygons island_top = intersection_ex(island, base[top]->polygons);
+                    if (! island_top.empty() && Algorithms::ExPolygon::area(diff_ex(island_top, deep)) < area_eps)
+                        append(trunks[block_idx], Algorithms::ExPolygon::to_polygons(island));
+                }
+        }
+    });
+
+    std::vector<SupportGeneratorLayersPtr> thick(num_blocks);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_blocks), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t block_idx = range.begin(); block_idx < range.end(); ++ block_idx) {
+            const Polygons &trunk = trunks[block_idx];
+            if (trunk.empty())
+                continue;
+            const LayerIndex below = first_object_layer + LayerIndex(block_idx * m);
+            // Move the islands of the block's layers, which belong to a trunk, to trunk_parts.
+            std::vector<Polygons> trunk_parts(m);
+            for (size_t i = 0; i < m; ++ i)
+                if (SupportGeneratorLayer *layer = base[below + 1 + LayerIndex(i)]; layer != nullptr && ! layer->polygons.empty()) {
+                    Polygons rest;
+                    for (ExPolygon &island : union_ex(layer->polygons)) {
+                        Polygons   polygons = Algorithms::ExPolygon::to_polygons(std::move(island));
+                        const bool in_trunk = Algorithms::Polygon::area(intersection(polygons, trunk)) > 0.5 * Algorithms::Polygon::area(polygons);
+                        append(in_trunk ? trunk_parts[i] : rest, std::move(polygons));
+                    }
+                    layer->polygons = std::move(rest);
+                }
+            // Print the trunk parts with n thick layers spanning the block.
+            const double z_below = layer_z(slicing_params, config, below);
+            for (size_t k = 0; k < n; ++ k) {
+                const double bottom_z = z_below + double(k) * H;
+                const double print_z  = k + 1 == n ? layer_z(slicing_params, config, below + LayerIndex(m)) : z_below + double(k + 1) * H;
+                Polygons     polygons;
+                Polygons     object;
+                for (size_t i = 0; i < m; ++ i)
+                    // Take all layers of the block, which overlap this thick layer in Z.
+                    if (z_below + double(i) * h < print_z - EPSILON && z_below + double(i + 1) * h > bottom_z + EPSILON) {
+                        append(polygons, trunk_parts[i]);
+                        if (size_t object_layer_idx = size_t(below + 1 + LayerIndex(i) - first_object_layer); object_layer_idx < print_object.layer_count())
+                            append(object, Algorithms::ExPolygon::to_polygons(print_object.get_layer(object_layer_idx)->lslices));
+                    }
+                if (! polygons.empty()) {
+                    // A thick layer takes the islands of several object layers. Keep each of them clear of the object
+                    // at all these object layers, as the object layers were each trimmed at their own height only.
+                    polygons = object.empty() ? union_(polygons) : diff(polygons, expand(object, float(config.xy_min_distance)));
+                    if (! polygons.empty()) {
+                        SupportGeneratorLayer &layer = layer_storage.allocate(SupporLayerType::Base);
+                        layer.print_z  = print_z;
+                        layer.bottom_z = bottom_z;
+                        layer.height   = print_z - bottom_z;
+                        layer.polygons = std::move(polygons);
+                        thick[block_idx].emplace_back(&layer);
+                    }
+                }
+            }
+        }
+    });
+    for (SupportGeneratorLayersPtr &layers : thick)
+        append(out, std::move(layers));
+    SPDLOG_INFO("Organic trunks: {} layers of {} mm replace {} mm layers in {} of {} blocks.", out.size(), H, h,
+        std::count_if(trunks.begin(), trunks.end(), [](const Polygons &p) { return ! p.empty(); }), num_blocks);
+    return out;
+}
+
 /*!
  * \brief Create the areas that need support.
  *
@@ -3608,13 +3806,27 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
         // Used by both classic and tree supports.
         SupportGeneratorLayersPtr raft_layers = generate_raft_base(print_object, support_params, print_object.slicing_parameters(), 
             top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
+        // Organic trunks printed with thicker layers than the object, for now enabled by an environment variable (height in mm).
+        // Not with a wipe tower, which was not tested with the support only layers this adds.
+        SupportGeneratorLayersPtr trunk_layers;
+        if (has_support && print_object.config().get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic &&
+            ! print.can_have_wipe_tower())
+            if (const char *trunk_layer_height = std::getenv("PRUSASLICER_ORGANIC_TRUNK_LAYER_HEIGHT"); trunk_layer_height != nullptr && std::atof(trunk_layer_height) > 0.)
+                trunk_layers = organic_thick_trunk_layers(print_object, config, std::atof(trunk_layer_height), intermediate_layers,
+                    { &top_contacts, &bottom_contacts, &interface_layers, &base_interface_layers }, layer_storage, throw_on_cancel);
+        SupportGeneratorLayersPtr intermediate_and_trunk_layers;
+        if (! trunk_layers.empty()) {
+            intermediate_and_trunk_layers = intermediate_layers;
+            append(intermediate_and_trunk_layers, trunk_layers);
+        }
 #if 1 //#ifdef SLIC3R_DEBUG
         SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
-            generate_support_layers(print_object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+            generate_support_layers(print_object, raft_layers, bottom_contacts, top_contacts,
+                trunk_layers.empty() ? intermediate_layers : intermediate_and_trunk_layers, interface_layers, base_interface_layers);
         // Don't fill in the tree supports, make them hollow with just a single sheath line.
         generate_support_toolpaths(print_object.support_layers(), print_object.config(), support_params, print_object.slicing_parameters(),
-            raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+            raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers, trunk_layers);
 
  #if 0
 //#ifdef SLIC3R_DEBUG

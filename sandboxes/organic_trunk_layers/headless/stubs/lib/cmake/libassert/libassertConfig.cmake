@@ -1,0 +1,5 @@
+if (NOT TARGET libassert::assert)
+    add_library(libassert::assert INTERFACE IMPORTED)
+    set_target_properties(libassert::assert PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/../../../include")
+endif()
+set(libassert_FOUND TRUE)
