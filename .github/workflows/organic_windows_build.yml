@@ -41,6 +41,7 @@ jobs:
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
           -DCMAKE_PREFIX_PATH="$PWD/deps/build/destdir/usr/local"
           -DSLIC3R_BUILD_TESTS=OFF -DSLIC3R_ENABLE_FORMAT_STEP=OFF -DSLIC3R_ENABLE_WEBKIT=OFF
+          -DSLIC3R_ENABLE_WIN10_MESH_REPAIR=OFF
 
       - name: Build PrusaSlicer
         shell: pwsh
