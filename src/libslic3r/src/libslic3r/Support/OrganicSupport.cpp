@@ -1,5 +1,7 @@
 #include "OrganicSupport.hpp"
 
+#include <Slic3r/Log.hpp>
+
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/partitioner.h>
@@ -13,6 +15,9 @@
 #include <optional>
 #include <utility>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <cstddef>
 
 #include "Slic3r/Biz/Algorithms/Polygon.hpp"
@@ -1029,6 +1034,42 @@ static void organic_smooth_branches_avoid_collisions(
 #endif // TREE_SUPPORT_ORGANIC_NUDGE_NEW
 
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
+// Organic support mesh export (fork addition). When PRUSASLICER_EXPORT_ORGANIC_STL
+// names a file, every branch tube extrude_branch() builds is also collected and
+// written there as a binary STL, in the print object's frame, before slicing.
+namespace {
+struct OrganicMeshExport {
+    std::mutex                 mutex;
+    std::vector<stl_vertex>    tris; // three per triangle
+    void add(const indexed_triangle_set &its) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const stl_triangle_vertex_indices &f : its.indices)
+            for (int i = 0; i < 3; ++ i)
+                tris.push_back(its.vertices[f[i]]);
+    }
+    void write(const char *path, const Vec2d &shift) const {
+        FILE *f = std::fopen(path, "wb");
+        if (! f) return;
+        char header[80] = "PrusaSlicer organic supports";
+        std::fwrite(header, 1, 80, f);
+        uint32_t n = uint32_t(tris.size() / 3);
+        std::fwrite(&n, 4, 1, f);
+        for (size_t t = 0; t < tris.size(); t += 3) {
+            float rec[12] = { 0.f, 0.f, 0.f };
+            for (int i = 0; i < 3; ++ i) {
+                rec[3 + i * 3]     = tris[t + i].x() + float(shift.x());
+                rec[3 + i * 3 + 1] = tris[t + i].y() + float(shift.y());
+                rec[3 + i * 3 + 2] = tris[t + i].z();
+            }
+            uint16_t attr = 0;
+            std::fwrite(rec, 4, 12, f);
+            std::fwrite(&attr, 2, 1, f);
+        }
+        std::fclose(f);
+    }
+};
+} // namespace
+
 void organic_draw_branches(
     PrintObject                     &print_object,
     TreeModelVolumes                &volumes, 
@@ -1212,8 +1253,11 @@ void organic_draw_branches(
     MeshSlicingParams mesh_slicing_params;
     mesh_slicing_params.mode = MeshSlicingParams::SlicingMode::Positive;
 
+    const char        *export_path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_STL");
+    OrganicMeshExport  mesh_export;
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
-        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
+        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel, export_path, &mesh_export](const tbb::blocked_range<size_t> &range) {
             indexed_triangle_set    partial_mesh;
             std::vector<float>      slice_z;
             std::vector<Polygons>   bottom_contacts;
@@ -1223,6 +1267,8 @@ void organic_draw_branches(
                     // Triangulate the tube.
                     partial_mesh.clear();
                     std::pair<float, float> zspan = extrude_branch(branch.path, config, slicing_params, move_bounds, partial_mesh);
+                    if (export_path)
+                        mesh_export.add(partial_mesh);
                     LayerIndex layer_begin = branch.has_root ?
                         branch.path.front()->state.layer_idx : 
                         std::min(branch.path.front()->state.layer_idx, layer_idx_ceil(slicing_params, config, zspan.first));
@@ -1365,6 +1411,10 @@ void organic_draw_branches(
             }
         }, tbb::simple_partitioner());
 
+    if (export_path)
+        // Branch tubes are in the object's frame; shift to the first instance's bed position.
+        mesh_export.write(export_path, unscaled<double>(print_object.instances().front().shift()));
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
         [&trees, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
         for (size_t tree_id = range.begin(); tree_id < range.end(); ++ tree_id) {
@@ -1399,6 +1449,62 @@ void organic_draw_branches(
                     }
                 }
         }
+
+    // Nothing may be printed on thin air. A branch clipped where it passes through
+    // the object, or one whose descent got stuck, leaves support islands that start
+    // mid-air; printed, they fall off or get knocked loose and crash the print.
+    // Walk up the layers and keep only islands that rest on the bed, on the object
+    // (placeable areas) or on support kept one layer below.
+    {
+        const size_t num_layers   = slices.size();
+        const double min_overlap  = sqr(double(config.support_line_width));
+        const float  touch        = float(0.5 * config.support_line_width);
+        Polygons     kept_below;
+        size_t       num_dropped  = 0;
+        for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
+            Slice                 &slice = slices[layer_idx];
+            SupportGeneratorLayer *top   = layer_idx < top_contacts.size() ? top_contacts[layer_idx] : nullptr;
+            Polygons all = slice.polygons;
+            append(all, slice.bottom_contacts);
+            if (top)
+                append(all, top->polygons);
+            if (all.empty()) {
+                kept_below.clear();
+                continue;
+            }
+            if (layer_idx == 0) {
+                kept_below = union_(all);
+                continue;
+            }
+            Polygons below = kept_below;
+            append(below, volumes.getPlaceableAreas(0, LayerIndex(layer_idx), throw_on_cancel));
+            below = expand(union_(below), touch);
+            Polygons kept;
+            for (ExPolygon &island : union_ex(all)) {
+                double island_area = Algorithms::ExPolygon::area(island);
+                double held        = Algorithms::Polygon::area(intersection(Algorithms::ExPolygon::to_polygons(island), below));
+                if (held >= std::min(min_overlap, 0.5 * island_area))
+                    append(kept, Algorithms::ExPolygon::to_polygons(std::move(island)));
+                else
+                    ++ num_dropped;
+            }
+            if (kept.empty()) {
+                slice.polygons.clear();
+                slice.bottom_contacts.clear();
+                if (top)
+                    top->polygons.clear();
+            } else {
+                slice.polygons = intersection(slice.polygons, kept);
+                slice.bottom_contacts = intersection(slice.bottom_contacts, kept);
+                if (top)
+                    top->polygons = intersection(top->polygons, kept);
+            }
+            kept_below = std::move(kept);
+            throw_on_cancel();
+        }
+        if (num_dropped > 0)
+            SPDLOG_WARN("Organic supports: removed {} support islands with nothing under them; the overhangs they held are unsupported.", num_dropped);
+    }
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, std::min(move_bounds.size(), slices.size()), 1),
         [&print_object, &config, &slices, &bottom_contacts, &top_contacts, &intermediate_layers, &layer_storage, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
