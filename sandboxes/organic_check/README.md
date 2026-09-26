@@ -6,8 +6,10 @@ down and come out as solid trees, with no islands starting in mid-air.
 - `test_shapes.py OUTDIR` writes test parts that force branches to route around
   lower features of the same part (roof over a dome, mushroom with a flange,
   shelf over a ramp, stepped arms).
-- `organic_check part.stl part.gcode [layer_height]` slices one STL with organic
-  supports and default settings, without the GUI. It is built with the tests
+- `organic_check part.stl part.gcode [layer_height] [key=value ...]` slices one STL
+  with organic supports and default settings, without the GUI. `key=value` changes
+  a print setting, such as `support_material_threshold=55` or
+  `support_material_buildplate_only=1`. It is built with the tests
   (`SLIC3R_BUILD_TESTS`).
 - `check_floating.py print.gcode` rasterizes each layer of a PrusaSlicer G-code
   and reports support islands with no plastic below them. Exit code 1 if any.

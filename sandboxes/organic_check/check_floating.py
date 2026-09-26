@@ -102,16 +102,20 @@ def main():
 
     all_grids = {}
     support_grids = {}
-    closing_r = max(1, int(round(args.sparse_gap / 2 / args.px)))
-    yy, xx = np.mgrid[-closing_r:closing_r + 1, -closing_r:closing_r + 1]
-    closing = xx * xx + yy * yy <= closing_r * closing_r
+    closing_r = max(1.0, args.sparse_gap / 2 / args.px)
+
+    def close_gaps(grid):
+        # Morphological closing with a disk, done with distance transforms (much faster than
+        # binary_closing with a large structuring element).
+        grown = ndimage.distance_transform_edt(~grid) <= closing_r
+        return ndimage.distance_transform_edt(grown) > closing_r
     floating = []
     n_support_layers = 0
     for z in zs:
         all_grids[z] = rasterize(layers[z], origin, shape, args.px, support_only=False)
         sup = rasterize(layers[z], origin, shape, args.px, support_only=True)
         # Support printed as sparse lines holds up the layer above across the gaps between them.
-        support_grids[z] = ndimage.binary_closing(sup, closing) if sup.any() else sup
+        support_grids[z] = close_gaps(sup) if sup.any() else sup
         if not sup.any():
             continue
         n_support_layers += 1
