@@ -5,10 +5,9 @@ the part, for example 0.3 mm trunks next to 0.2 mm part layers, while the top of
 every branch keeps the part's layer height so the tips meet the part exactly as
 before.
 
-It is off by default. Turn it on by setting an environment variable before
-starting PrusaSlicer (GUI or command line):
-
-    PRUSASLICER_ORGANIC_TRUNK_LAYER_HEIGHT=0.3 prusa-slicer
+It is off by default. Turn it on with Trunk Layer Height in the Organic
+supports group of the support settings (`support_tree_trunk_layer_height`,
+in mm, 0 is off), for example 0.3 for a part printed at 0.2 mm.
 
 ## How it works
 
@@ -53,7 +52,7 @@ only, like classic supports with a support layer height above the part's.
 `check_trunk_layers.py` compares a G-code sliced with thick trunks to the same
 part sliced without them:
 
-    PRUSASLICER_ORGANIC_TRUNK_LAYER_HEIGHT=0.3 slice_stl part.stl trunk.gcode
+    slice_stl part.stl trunk.gcode support_tree_trunk_layer_height=0.3
     slice_stl part.stl normal.gcode
     python3 check_trunk_layers.py trunk.gcode --baseline normal.gcode
 

@@ -4457,6 +4457,26 @@ void fdm_config_init_fn(ConfigDefinitions& defs)
     def->max_literal = 35;
     def->init_fn = init_with(Percentage{15.});
 
+    def = defs.add("support_tree_trunk_layer_height", typeid(double));
+    def->location = Print;
+    def->compatibility_rule = CompatibilityRule::Min;
+    def->overrides_in = Locations{ Tool, Object };
+    def->label = L("Trunk Layer Height");
+    def->option_group = ConfigItemDef::OptionGroup::Print_Supports_OrganicSupports;
+    def->category = ConfigItemDef::Category::Print_Supports;
+    def->order = 8;
+    def->gui_type = ConfigItemDef::GUIType::textfield;
+    // TRN PrintSettings: "Organic supports" > "Trunk Layer Height"
+    def->tooltip = L("Print the trunks of organic supports with thicker layers than the object to save time, "
+                     "while the top of each branch keeps the object's layer height, so the tips meet the object as before. "
+                     "A whole number of trunk layers spans a whole number of object layers, so the thickest layers that fit "
+                     "this value and the extruder's maximum layer height are used, for example 0.3 mm trunk layers for "
+                     "0.2 mm object layers. Set this value to zero to print the trunks with the object's layer height. "
+                     "Not used with variable layer height, soluble supports or a wipe tower.");
+    def->units = {L("mm")};
+    def->min = 0;
+    def->init_fn = init_with(0.);
+
     def = defs.add("temperature", typeid(int));
     def->location = Filament;
     def->label = L("Nozzle other layers");

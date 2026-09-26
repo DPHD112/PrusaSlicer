@@ -3806,14 +3806,14 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
         // Used by both classic and tree supports.
         SupportGeneratorLayersPtr raft_layers = generate_raft_base(print_object, support_params, print_object.slicing_parameters(), 
             top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
-        // Organic trunks printed with thicker layers than the object, for now enabled by an environment variable (height in mm).
+        // Organic trunks printed with thicker layers than the object.
         // Not with a wipe tower, which was not tested with the support only layers this adds.
         SupportGeneratorLayersPtr trunk_layers;
-        if (has_support && print_object.config().get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic &&
-            ! print.can_have_wipe_tower())
-            if (const char *trunk_layer_height = std::getenv("PRUSASLICER_ORGANIC_TRUNK_LAYER_HEIGHT"); trunk_layer_height != nullptr && std::atof(trunk_layer_height) > 0.)
-                trunk_layers = organic_thick_trunk_layers(print_object, config, std::atof(trunk_layer_height), intermediate_layers,
-                    { &top_contacts, &bottom_contacts, &interface_layers, &base_interface_layers }, layer_storage, throw_on_cancel);
+        if (const double trunk_layer_height = print_object.config().get<double>("support_tree_trunk_layer_height");
+            trunk_layer_height > 0. && has_support && ! print.can_have_wipe_tower() &&
+            print_object.config().get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic)
+            trunk_layers = organic_thick_trunk_layers(print_object, config, trunk_layer_height, intermediate_layers,
+                { &top_contacts, &bottom_contacts, &interface_layers, &base_interface_layers }, layer_storage, throw_on_cancel);
         SupportGeneratorLayersPtr intermediate_and_trunk_layers;
         if (! trunk_layers.empty()) {
             intermediate_and_trunk_layers = intermediate_layers;
