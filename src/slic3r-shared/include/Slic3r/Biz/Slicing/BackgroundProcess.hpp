@@ -77,6 +77,9 @@ public:
 
     std::string get_hw_printer_id() const;
 
+    // Writes the support of the last finished slice to a binary STL. False if there is none.
+    bool export_support_stl(const std::string& path);
+
 private:
     std::string m_hw_config_id;
     std::unique_ptr<Biz::Slicing::IPrint> m_print;

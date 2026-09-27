@@ -2,6 +2,7 @@
 #define slic3r_OrganicSupport_hpp
 
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "SupportCommon.hpp"
@@ -11,6 +12,7 @@
 namespace Slic3r
 {
 
+class Print;
 class PrintObject;
 
 namespace FFFTreeSupport
@@ -19,6 +21,10 @@ namespace FFFTreeSupport
 class TreeModelVolumes;
 class InterfacePlacer;
 struct TreeSupportSettings;
+
+// Writes the support of every object of a sliced print to a binary STL, placed as printed.
+// Returns false if there is no support or the file cannot be written.
+bool export_support_stl(const Print &print, const std::string &path);
 
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
 void organic_draw_branches(

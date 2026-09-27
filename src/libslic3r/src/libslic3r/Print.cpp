@@ -23,6 +23,7 @@
 #include "Slic3r/LegacyFormat.hpp"
 #include "libslic3r/PrePreview.hpp"
 #include "libslic3r/ModelUtils.hpp"
+#include "libslic3r/Support/OrganicSupport.hpp"
 #include "libslic3r/SlicingInput.hpp"
 #include "libslic3r/CustomParametersHandling.hpp"
 #include "libslic3r/InstanceTransformations.hpp"
@@ -1984,6 +1985,11 @@ void Print::alert_when_supports_needed()
 }
 
 // Wipe tower support.
+bool Print::export_support_stl(const std::string &path) const
+{
+    return FFFTreeSupport::export_support_stl(*this, path);
+}
+
 bool Print::can_have_wipe_tower() const
 {
     return !m_config.get<bool>("spiral_vase")
