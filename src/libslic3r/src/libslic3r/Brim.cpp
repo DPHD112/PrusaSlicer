@@ -173,6 +173,41 @@ static Polygons top_level_outer_brim_islands(const ConstPrintObjectPtrs &top_lev
     return islands;
 }
 
+// Mouse ears, after OrcaSlicer's make_brim_ears_auto(): round discs centred at the sharp convex
+// corners of the first layer outline, where parts tend to lift. The outer brim is limited to them.
+static Polygons brim_ears(const ExPolygon &ex_poly, const double radius, const double detection_length, const double max_angle_deg)
+{
+    Polygon contour = ex_poly.contour;
+    if (detection_length > 0) {
+        // Curves made of many short segments count as one corner.
+        Polygon simplified = contour;
+        Algorithms::DouglasPeucker::douglas_peucker(simplified, detection_length);
+        if (simplified.points.size() >= 3)
+            contour = std::move(simplified);
+    }
+    // The contour is counter-clockwise, so the path turns left at a convex corner, and the corner's
+    // inner angle is 180 degrees minus the turn.
+    const double min_turn  = PI - max_angle_deg * PI / 180.;
+    const size_t num_sides = 32;
+    Polygons     ears;
+    const Points &pts = contour.points;
+    for (size_t i = 0; i < pts.size(); ++ i) {
+        const Vec2d d1   = (pts[i] - pts[(i + pts.size() - 1) % pts.size()]).cast<double>();
+        const Vec2d d2   = (pts[(i + 1) % pts.size()] - pts[i]).cast<double>();
+        const double turn = std::atan2(cross2(d1, d2), d1.dot(d2));
+        if (turn <= 0 || turn < min_turn - EPSILON)
+            continue;
+        Polygon ear;
+        ear.points.reserve(num_sides);
+        for (size_t k = 0; k < num_sides; ++ k) {
+            const double a = 2. * PI * double(k) / double(num_sides);
+            ear.points.emplace_back(pts[i] + Point(coord_t(radius * std::cos(a)), coord_t(radius * std::sin(a))));
+        }
+        ears.emplace_back(std::move(ear));
+    }
+    return ears;
+}
+
 static ExPolygons top_level_outer_brim_area(const Print                   &print,
                                             const ConstPrintObjectPtrs    &top_level_objects_with_brim,
                                             const std::vector<ExPolygons> &bottom_layers_expolygons,
@@ -192,12 +227,19 @@ static ExPolygons top_level_outer_brim_area(const Print                   &print
         const float        brim_separation   = scale_(object->config().get<double>("brim_separation"));
         const float        brim_width        = scale_(object->config().get<double>("brim_width"));
         const bool         is_top_outer_brim = top_level_objects_idx.find(object->id().id) != top_level_objects_idx.end();
+        const bool         use_ears          = object->config().get<bool>("brim_ears");
+        const double       ears_detection_length = scale_(object->config().get<double>("brim_ears_detection_length"));
+        const double       ears_max_angle    = object->config().get<double>("brim_ears_max_angle");
 
         ExPolygons brim_area_object;
         ExPolygons no_brim_area_object;
         for (const ExPolygon &ex_poly : bottom_layers_expolygons[print_object_idx]) {
-            if ((brim_type == Domain::BrimType::OuterOnly || brim_type == Domain::BrimType::OuterAndInner) && is_top_outer_brim)
-                append(brim_area_object, diff_ex(offset(ex_poly.contour, brim_width + brim_separation, ClipperLib::jtSquare), offset(ex_poly.contour, brim_separation, ClipperLib::jtSquare)));
+            if ((brim_type == Domain::BrimType::OuterOnly || brim_type == Domain::BrimType::OuterAndInner) && is_top_outer_brim) {
+                ExPolygons outer = diff_ex(offset(ex_poly.contour, brim_width + brim_separation, ClipperLib::jtSquare), offset(ex_poly.contour, brim_separation, ClipperLib::jtSquare));
+                if (use_ears)
+                    outer = intersection_ex(outer, brim_ears(ex_poly, brim_width + brim_separation, ears_detection_length, ears_max_angle));
+                append(brim_area_object, std::move(outer));
+            }
 
             // After 7ff76d07684858fd937ef2f5d863f105a10f798e offset and shrink don't work with CW polygons (holes), so let's make it CCW.
             Polygons ex_poly_holes_reversed = ex_poly.holes;
