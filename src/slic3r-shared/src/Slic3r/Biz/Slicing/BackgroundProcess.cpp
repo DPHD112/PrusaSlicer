@@ -285,6 +285,15 @@ void BackgroundProcess::stop()
     });
 }
 
+bool BackgroundProcess::export_support_stl(const std::string& path)
+{
+    if (m_get_status() != StatusCode::Finished) {
+        return false;
+    }
+    const LoggingScopeLock lock{m_mutex, "background process"};
+    return m_print->export_support_stl(path);
+}
+
 std::string BackgroundProcess::get_hw_printer_id() const {
     return m_hw_config_id;
 }

@@ -151,6 +151,12 @@ void SlicingInteractor::stop_slicing_bed(const Domain::SlicingId id)
     m_processes.at(id).stop();
 }
 
+bool SlicingInteractor::export_support_stl(const Domain::SlicingId id, const std::string& path)
+{
+    const auto it = m_processes.find(id);
+    return it != m_processes.end() && it->second.export_support_stl(path);
+}
+
 void SlicingInteractor::slice_all()
 {
     m_slicing_queue = {};

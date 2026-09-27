@@ -99,6 +99,7 @@ private:
     void export_selection_as_stl_obj();
 
     void replace_selected_volume_with_stl();
+    void export_support_stl();
 
     void reload_selection_from_disk();
 

@@ -1,5 +1,7 @@
 #include "OrganicSupport.hpp"
 
+#include <Slic3r/Log.hpp>
+
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/partitioner.h>
@@ -7,20 +9,28 @@
 #include <boost/container/vector.hpp>
 #include <cassert>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <optional>
 #include <utility>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 #include <cstddef>
 
+#include "Slic3r/Biz/Algorithms/ExPolygon.hpp"
 #include "Slic3r/Biz/Algorithms/Polygon.hpp"
 #include "Slic3r/Biz/Algorithms/AABBTreeLines.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/MutablePolygon.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
+#include "libslic3r/SlicesToTriangleMesh.hpp"
 #include "admesh/stl.h"
 #include "Slic3r/Biz/Algorithms/AABBTreeIndirect.hpp"
 #include "libslic3r/Line.hpp"
@@ -775,6 +785,8 @@ static void organic_smooth_branches_avoid_collisions(
         // 
         Vec3f                 last_collision;
         double                last_collision_depth;
+        // Sphere center was inside the object on the layer of last_collision.
+        bool                  last_collision_inside{ false };
         // Minimum Z for which the sphere collision will be evaluated.
         // Limited by the minimum sloping angle and by the bottom of the tree.
         float                 min_z{ -std::numeric_limits<float>::max() };
@@ -839,30 +851,41 @@ static void organic_smooth_branches_avoid_collisions(
     static constexpr const double max_nudge_collision_avoidance = 0.5;
     static constexpr const double max_nudge_smoothing = 0.2;
     static constexpr const size_t num_iter = 100; // 1000;
-    for (size_t iter = 0; iter < num_iter; ++ iter) {
+    // Extra iterations without smoothing, only pushing spheres out of the object,
+    // in case smoothing kept pulling some of them back in.
+    static constexpr const size_t num_iter_collision_only = 100;
+    for (size_t iter = 0; iter < num_iter + num_iter_collision_only; ++ iter) {
+        const bool smooth = iter < num_iter;
         // Back up prev position before Laplacian smoothing.
         for (CollisionSphere &collision_sphere : collision_spheres)
             collision_sphere.prev_position = collision_sphere.position;
         std::atomic<size_t> num_moved{ 0 };
         tbb::parallel_for(tbb::blocked_range<size_t>(0, collision_spheres.size()),
-            [&collision_spheres, &layer_collision_cache, &slicing_params, &config, &linear_data_layers, &num_moved, &throw_on_cancel](const tbb::blocked_range<size_t> range) {
+            [&collision_spheres, &layer_collision_cache, &slicing_params, &config, &linear_data_layers, &num_moved, &throw_on_cancel, smooth](const tbb::blocked_range<size_t> range) {
             for (size_t collision_sphere_id = range.begin(); collision_sphere_id < range.end(); ++ collision_sphere_id)
                 if (CollisionSphere &collision_sphere = collision_spheres[collision_sphere_id]; ! collision_sphere.locked) {
                     // Calculate collision of multiple 2D layers against a collision sphere.
                     collision_sphere.last_collision_depth = - std::numeric_limits<double>::max();
+                    const Vec2d center = to_2d(collision_sphere.position).cast<double>();
                     for (uint32_t layer_id = collision_sphere.layer_begin; layer_id != collision_sphere.layer_end; ++ layer_id) {
                         double dz = (layer_id - collision_sphere.element.state.layer_idx) * slicing_params.layer_height;
                         if (double r2 = sqr(collision_sphere.radius) - sqr(dz); r2 > 0) {
                             if (const LayerCollisionCache &layer_collision_cache_item = layer_collision_cache[layer_id]; ! layer_collision_cache_item.empty()) {
                                 size_t hit_idx_out;
                                 Vec2d  hit_point_out;
-                                if (double dist = sqrt(AABBTreeLines::squared_distance_to_indexed_lines(
-                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, Vec2d(to_2d(collision_sphere.position).cast<double>()),
-                                    hit_idx_out, hit_point_out, r2)); dist >= 0.) {
-                                    double collision_depth = sqrt(r2) - dist;
+                                // The distance query only sees the object's outline, so a sphere whose center sits
+                                // inside the object looked collision free (deeper than its radius) or got pushed further in.
+                                const bool inside = AABBTreeLines::point_outside_closed_contours(
+                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, center) < 0;
+                                double dist2 = AABBTreeLines::squared_distance_to_indexed_lines(
+                                    layer_collision_cache_item.lines, layer_collision_cache_item.aabbtree_lines, center,
+                                    hit_idx_out, hit_point_out, inside ? std::numeric_limits<double>::infinity() : r2);
+                                if (dist2 >= 0.) {
+                                    double collision_depth = inside ? sqrt(r2) + sqrt(dist2) : sqrt(r2) - sqrt(dist2);
                                     if (collision_depth > collision_sphere.last_collision_depth) {
-                                        collision_sphere.last_collision_depth = collision_depth;
-                                        collision_sphere.last_collision = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                        collision_sphere.last_collision_depth  = collision_depth;
+                                        collision_sphere.last_collision        = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                        collision_sphere.last_collision_inside = inside;
                                     }
                                 }
                             }
@@ -876,8 +899,19 @@ static void organic_smooth_branches_avoid_collisions(
                             ++ num_moved;
                         // Shift by maximum 2mm.
                         double nudge_dist = std::min(std::max(0., collision_sphere.last_collision_depth + collision_extra_gap), max_nudge_collision_avoidance);
-                        Vec2d nudge_vector = (to_2d(collision_sphere.position) - to_2d(collision_sphere.last_collision)).cast<double>().normalized() * nudge_dist;
-                        collision_sphere.position.head<2>() += (nudge_vector * nudge_dist).cast<float>();
+                        // Away from the outline when outside the object, towards it when inside.
+                        Vec2d away = center - to_2d(collision_sphere.last_collision).cast<double>();
+                        if (collision_sphere.last_collision_inside)
+                            away = - away;
+                        // The push used to be scaled by nudge_dist twice (0.01 mm for a 0.1 mm overlap),
+                        // so Laplacian smoothing below always pulled the sphere back into the object.
+                        if (double len = away.norm(); len > EPSILON)
+                            collision_sphere.position.head<2>() += (away * (nudge_dist / len)).cast<float>();
+                    }
+                    if (! smooth || collision_sphere.last_collision_depth > 0) {
+                        // Don't let smoothing drag a colliding sphere back into the object.
+                        throw_on_cancel();
+                        continue;
                     }
                     // Laplacian smoothing
                     Vec2d avg{ 0, 0 };
@@ -916,6 +950,8 @@ static void organic_smooth_branches_avoid_collisions(
         std::sort(stat.begin(), stat.end());
         printf("iteration: %d, moved: %d, collision depth: min %lf, max %lf, median %lf\n", int(iter), int(num_moved), stat.front(), stat.back(), stat[stat.size() / 2]);
 #endif
+        if (std::getenv("PRUSASLICER_ORGANIC_STATS") && (num_moved == 0 || iter + 1 == num_iter + num_iter_collision_only))
+            std::fprintf(stderr, "organic-stats: nudge iterations %zu, spheres still colliding %zu of %zu\n", iter + 1, size_t(num_moved), collision_spheres.size());
         if (num_moved == 0)
             break;
     }
@@ -1029,6 +1065,257 @@ static void organic_smooth_branches_avoid_collisions(
 #endif // TREE_SUPPORT_ORGANIC_NUDGE_NEW
 
 // Organic specific: Smooth branches and produce one cummulative mesh to be sliced.
+// Organic support mesh export (fork addition). PRUSASLICER_EXPORT_ORGANIC_STL names a
+// binary STL to receive the support as it will be printed: the final per-layer support
+// areas (after clipping against the object and fixing floating islands) stacked into a
+// solid, placed on the bed like the G-code. PRUSASLICER_EXPORT_ORGANIC_TUBES_STL receives
+// the raw smooth branch tubes before any clipping, for debugging.
+namespace {
+struct OrganicMeshExport {
+    std::mutex                 mutex;
+    std::vector<stl_vertex>    tris; // three per triangle
+    void add(const indexed_triangle_set &its) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const stl_triangle_vertex_indices &f : its.indices)
+            for (int i = 0; i < 3; ++ i)
+                tris.push_back(its.vertices[f[i]]);
+    }
+    bool write(const char *path, const Vec2d &shift) const {
+        FILE *f = std::fopen(path, "wb");
+        if (! f) return false;
+        char header[80] = "PrusaSlicer organic supports";
+        std::fwrite(header, 1, 80, f);
+        uint32_t n = uint32_t(tris.size() / 3);
+        std::fwrite(&n, 4, 1, f);
+        for (size_t t = 0; t < tris.size(); t += 3) {
+            float rec[12] = { 0.f, 0.f, 0.f };
+            for (int i = 0; i < 3; ++ i) {
+                rec[3 + i * 3]     = tris[t + i].x() + float(shift.x());
+                rec[3 + i * 3 + 1] = tris[t + i].y() + float(shift.y());
+                rec[3 + i * 3 + 2] = tris[t + i].z();
+            }
+            uint16_t attr = 0;
+            std::fwrite(rec, 4, 12, f);
+            std::fwrite(&attr, 2, 1, f);
+        }
+        return std::fclose(f) == 0;
+    }
+};
+
+// slices_to_mesh() leaves T-junctions: a wall edge in a layer plane can meet a horizontal
+// face whose edge has an extra vertex in the middle, so both edges count as open and slicers
+// report the mesh as broken. Split each triangle at the vertices lying on its open edges,
+// which closes those cracks.
+static void its_split_t_junctions(indexed_triangle_set &its)
+{
+    // Vertices at the same position must share an index for the edges to match up. Points that
+    // came out of different polygon operations can differ in the last bit of a float, so merge
+    // vertices closer than merge_dist.
+    {
+        constexpr float merge_dist = 1e-4f;
+        auto cell_of = [](const stl_vertex &v) {
+            return std::array<int64_t, 3>{ int64_t(std::floor(v.x() / merge_dist)), int64_t(std::floor(v.y() / merge_dist)), int64_t(std::floor(v.z() / merge_dist)) };
+        };
+        struct CellHash { size_t operator()(const std::array<int64_t, 3> &c) const {
+            return size_t(c[0] * 73856093) ^ size_t(c[1] * 19349663) ^ size_t(c[2] * 83492791); } };
+        std::unordered_map<std::array<int64_t, 3>, std::vector<int>, CellHash> grid;
+        grid.reserve(its.vertices.size());
+        std::vector<int>        remap(its.vertices.size());
+        std::vector<stl_vertex> vertices;
+        for (size_t i = 0; i < its.vertices.size(); ++ i) {
+            const stl_vertex            &v    = its.vertices[i];
+            const std::array<int64_t, 3> cell = cell_of(v);
+            int                          found = -1;
+            for (int64_t dx = -1; dx <= 1 && found < 0; ++ dx)
+                for (int64_t dy = -1; dy <= 1 && found < 0; ++ dy)
+                    for (int64_t dz = -1; dz <= 1 && found < 0; ++ dz)
+                        if (auto it = grid.find({ cell[0] + dx, cell[1] + dy, cell[2] + dz }); it != grid.end())
+                            for (int j : it->second)
+                                if ((vertices[j] - v).squaredNorm() < merge_dist * merge_dist) {
+                                    found = j;
+                                    break;
+                                }
+            if (found < 0) {
+                found = int(vertices.size());
+                vertices.push_back(v);
+                grid[cell].push_back(found);
+            }
+            remap[i] = found;
+        }
+        for (stl_triangle_vertex_indices &f : its.indices)
+            for (int &v : f)
+                v = remap[v];
+        its.vertices = std::move(vertices);
+        // Drop triangles that collapsed.
+        its.indices.erase(std::remove_if(its.indices.begin(), its.indices.end(),
+            [](const stl_triangle_vertex_indices &f) { return f[0] == f[1] || f[1] == f[2] || f[2] == f[0]; }), its.indices.end());
+    }
+    auto edge_key = [](int a, int b) {
+        return a < b ? (uint64_t(uint32_t(a)) << 32) | uint32_t(b) : (uint64_t(uint32_t(b)) << 32) | uint32_t(a);
+    };
+    std::unordered_map<uint64_t, int> edge_count;
+    edge_count.reserve(its.indices.size() * 2);
+    for (const stl_triangle_vertex_indices &f : its.indices)
+        for (int i = 0; i < 3; ++ i)
+            ++ edge_count[edge_key(f[i], f[(i + 1) % 3])];
+
+    // Open edges and their end points, grouped by layer height. All the cracks are horizontal.
+    struct OpenEdge { int face; int edge; };
+    struct Level { std::vector<OpenEdge> edges; std::vector<int> vertices; };
+    std::map<float, Level> levels;
+    for (int face = 0; face < int(its.indices.size()); ++ face) {
+        const stl_triangle_vertex_indices &f = its.indices[face];
+        for (int i = 0; i < 3; ++ i) {
+            int a = f[i], b = f[(i + 1) % 3];
+            if (edge_count[edge_key(a, b)] != 1 || its.vertices[a].z() != its.vertices[b].z())
+                continue;
+            Level &level = levels[its.vertices[a].z()];
+            level.edges.push_back({ face, i });
+            level.vertices.push_back(a);
+            level.vertices.push_back(b);
+        }
+    }
+
+    constexpr float cell = 1.f;
+    constexpr float tol  = 2e-4f;
+    auto cell_key = [](int cx, int cy) { return (uint64_t(uint32_t(cx)) << 32) | uint32_t(cy); };
+    // Per face and per edge, the vertices lying on that edge as (position along it, vertex).
+    std::unordered_map<int, std::array<std::vector<std::pair<float, int>>, 3>> splits;
+    for (auto &[z, level] : levels) {
+        sort_remove_duplicates(level.vertices);
+        std::unordered_map<uint64_t, std::vector<int>> grid;
+        for (int v : level.vertices)
+            grid[cell_key(int(std::floor(its.vertices[v].x() / cell)), int(std::floor(its.vertices[v].y() / cell)))].push_back(v);
+        for (const OpenEdge &e : level.edges) {
+            const stl_triangle_vertex_indices &f = its.indices[e.face];
+            const int   a  = f[e.edge], b = f[(e.edge + 1) % 3];
+            const Vec2f pa = its.vertices[a].head<2>(), pb = its.vertices[b].head<2>();
+            const Vec2f d  = pb - pa;
+            const float l2 = d.squaredNorm();
+            if (l2 <= 0.f)
+                continue;
+            const Vec2f lo = pa.cwiseMin(pb) - Vec2f(tol, tol), hi = pa.cwiseMax(pb) + Vec2f(tol, tol);
+            for (int cx = int(std::floor(lo.x() / cell)); cx <= int(std::floor(hi.x() / cell)); ++ cx)
+                for (int cy = int(std::floor(lo.y() / cell)); cy <= int(std::floor(hi.y() / cell)); ++ cy)
+                    if (auto it = grid.find(cell_key(cx, cy)); it != grid.end())
+                        for (int c : it->second) {
+                            if (c == f[0] || c == f[1] || c == f[2])
+                                continue;
+                            const Vec2f pc = its.vertices[c].head<2>();
+                            const float t  = (pc - pa).dot(d) / l2;
+                            // Strictly inside the edge, not at (or next to) either end.
+                            const float t_min = tol / std::sqrt(l2);
+                            if (t > t_min && t < 1.f - t_min && (pa + t * d - pc).squaredNorm() < tol * tol)
+                                splits[e.face][e.edge].emplace_back(t, c);
+                        }
+        }
+    }
+
+    for (auto &[face, edges] : splits) {
+        const stl_triangle_vertex_indices f = its.indices[face];
+        // The triangle's outline with the split vertices inserted, in order.
+        std::vector<int> outline;
+        int num_split_edges = 0;
+        int split_edge      = 0;
+        for (int i = 0; i < 3; ++ i) {
+            outline.push_back(f[i]);
+            std::sort(edges[i].begin(), edges[i].end());
+            edges[i].erase(std::unique(edges[i].begin(), edges[i].end(),
+                [](const auto &l, const auto &r) { return l.second == r.second; }), edges[i].end());
+            for (const auto &[t, v] : edges[i])
+                outline.push_back(v);
+            if (! edges[i].empty()) {
+                ++ num_split_edges;
+                split_edge = i;
+            }
+        }
+        std::vector<stl_triangle_vertex_indices> fan;
+        if (num_split_edges == 1) {
+            // Fan from the corner opposite the split edge.
+            const int apex = f[(split_edge + 2) % 3];
+            auto it = std::find(outline.begin(), outline.end(), apex);
+            std::rotate(outline.begin(), it, outline.end());
+            for (size_t i = 1; i + 1 < outline.size(); ++ i)
+                fan.push_back({ apex, outline[i], outline[i + 1] });
+        } else {
+            // Fan from the centroid, so that no triangle is flat.
+            const int apex = int(its.vertices.size());
+            its.vertices.emplace_back((its.vertices[f[0]] + its.vertices[f[1]] + its.vertices[f[2]]) / 3.f);
+            for (size_t i = 0; i < outline.size(); ++ i)
+                fan.push_back({ apex, outline[i], outline[(i + 1) % outline.size()] });
+        }
+        its.indices[face] = fan.front();
+        its.indices.insert(its.indices.end(), fan.begin() + 1, fan.end());
+    }
+}
+
+} // namespace
+
+// Writes the support of every object of a sliced print to a binary STL, placed as printed
+// on the bed: one layered solid per object copy. Works for any support style.
+bool export_support_stl(const Print &print, const std::string &path)
+{
+    OrganicMeshExport support_export;
+    size_t num_triangles = 0;
+    for (const PrintObject *print_object : print.objects()) {
+        std::vector<ExPolygons> layers;
+        std::vector<float>      grid;
+        double                  zmin = 0;
+        for (const SupportLayer *layer : print_object->support_layers()) {
+            if (layers.empty())
+                zmin = layer->print_z - layer->height;
+            // 0.05 mm simplification keeps the mesh a manageable size for importing.
+            layers.emplace_back(Algorithms::ExPolygon::simplify(layer->support_islands, scaled<double>(0.05)));
+            grid.emplace_back(float(layer->print_z));
+        }
+        if (layers.empty())
+            continue;
+        indexed_triangle_set mesh = slices_to_mesh(layers, zmin, grid);
+        its_split_t_junctions(mesh);
+        for (const PrintInstance &instance : print_object->instances()) {
+            indexed_triangle_set copy = mesh;
+            const Vec2f shift = unscaled<double>(instance.shift()).cast<float>();
+            for (stl_vertex &v : copy.vertices)
+                v.head<2>() += shift;
+            support_export.add(copy);
+            num_triangles += copy.indices.size();
+        }
+    }
+    if (num_triangles == 0)
+        return false;
+    return support_export.write(path.c_str(), Vec2d::Zero());
+}
+
+namespace {
+
+// Organic support diagnostics (fork addition). When PRUSASLICER_ORGANIC_STATS is set,
+// report to stderr how much of the branch tubes had to be clipped away because they
+// ran into the object, and how many support islands were left with nothing under them.
+struct OrganicStats {
+    std::mutex mutex;
+    size_t     num_branches{ 0 };
+    size_t     num_branches_clipped{ 0 };
+    double     tube_volume{ 0 };
+    double     clipped_volume{ 0 };
+    // Clipped away from the part of a branch between its tip and its root, not counting the
+    // tip poking into the overhang it holds or a root sitting on the part: these are branches
+    // running into the part on their way down.
+    size_t     num_branches_clipped_on_way{ 0 };
+    double     clipped_on_way_volume{ 0 };
+    void add_branch(double volume, double clipped, double clipped_on_way, double clipped_threshold) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++ num_branches;
+        tube_volume    += volume;
+        clipped_volume += clipped;
+        if (clipped > clipped_threshold)
+            ++ num_branches_clipped;
+        clipped_on_way_volume += clipped_on_way;
+        if (clipped_on_way > clipped_threshold)
+            ++ num_branches_clipped_on_way;
+    }
+};
+} // namespace
+
 void organic_draw_branches(
     PrintObject                     &print_object,
     TreeModelVolumes                &volumes, 
@@ -1212,8 +1499,13 @@ void organic_draw_branches(
     MeshSlicingParams mesh_slicing_params;
     mesh_slicing_params.mode = MeshSlicingParams::SlicingMode::Positive;
 
+    const char        *export_path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_TUBES_STL");
+    OrganicMeshExport  mesh_export;
+    const bool         print_stats = std::getenv("PRUSASLICER_ORGANIC_STATS") != nullptr;
+    OrganicStats       stats;
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
-        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
+        [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel, export_path, &mesh_export, print_stats, &stats](const tbb::blocked_range<size_t> &range) {
             indexed_triangle_set    partial_mesh;
             std::vector<float>      slice_z;
             std::vector<Polygons>   bottom_contacts;
@@ -1223,6 +1515,8 @@ void organic_draw_branches(
                     // Triangulate the tube.
                     partial_mesh.clear();
                     std::pair<float, float> zspan = extrude_branch(branch.path, config, slicing_params, move_bounds, partial_mesh);
+                    if (export_path)
+                        mesh_export.add(partial_mesh);
                     LayerIndex layer_begin = branch.has_root ?
                         branch.path.front()->state.layer_idx : 
                         std::min(branch.path.front()->state.layer_idx, layer_idx_ceil(slicing_params, config, zspan.first));
@@ -1238,8 +1532,26 @@ void organic_draw_branches(
                     std::vector<Polygons> slices = slice_mesh(partial_mesh, slice_z, mesh_slicing_params, throw_on_cancel);
                     bottom_contacts.clear();
                     //FIXME parallelize?
-                    for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i)
+                    double tube_area = 0, clipped_area = 0, clipped_on_way_area = 0;
+                    // Layers next to a tip (with the top Z gap) and next to a root resting on the part.
+                    const LayerIndex tip_margin  = branch.has_tip ? LayerIndex(config.tip_layers + config.z_distance_top_layers + 2) : 0;
+                    const LayerIndex root_margin = branch.has_root && layer_begin > 0 ? LayerIndex(config.z_distance_bottom_layers + 2) : 0;
+                    for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i) {
+                        double area_before = print_stats ? Algorithms::Polygon::area(slices[i]) : 0;
                         slices[i] = diff_clipped(slices[i], volumes.getCollision(0, layer_begin + i, true)); //FIXME parent_uses_min || draw_area.element->state.use_min_xy_dist);
+                        if (print_stats) {
+                            const double clipped = area_before - Algorithms::Polygon::area(slices[i]);
+                            tube_area    += area_before;
+                            clipped_area += clipped;
+                            if (i >= root_margin && i < LayerIndex(slices.size()) - tip_margin)
+                                clipped_on_way_area += clipped;
+                        }
+                    }
+                    if (print_stats) {
+                        // Scaled area to mm^3; a branch counts as clipped once it lost more than a 1 mm^2 layer's worth.
+                        const double to_mm3 = SCALING_FACTOR * SCALING_FACTOR * config.layer_height * SCALING_FACTOR;
+                        stats.add_branch(tube_area * to_mm3, clipped_area * to_mm3, clipped_on_way_area * to_mm3, config.layer_height * SCALING_FACTOR);
+                    }
 
                     size_t num_empty = 0;
                     if (slices.front().empty()) {
@@ -1365,6 +1677,16 @@ void organic_draw_branches(
             }
         }, tbb::simple_partitioner());
 
+    if (export_path)
+        // Branch tubes are in the object's frame; shift to the first instance's bed position.
+        mesh_export.write(export_path, unscaled<double>(print_object.instances().front().shift()));
+    if (print_stats)
+        std::fprintf(stderr, "organic-stats: branches %zu, clipped by object %zu, tube volume %.1f mm3, clipped volume %.2f mm3\n",
+            stats.num_branches, stats.num_branches_clipped, stats.tube_volume, stats.clipped_volume);
+    if (print_stats)
+        std::fprintf(stderr, "organic-stats: away from tips and roots: branches clipped %zu, clipped volume %.2f mm3\n",
+            stats.num_branches_clipped_on_way, stats.clipped_on_way_volume);
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
         [&trees, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
         for (size_t tree_id = range.begin(); tree_id < range.end(); ++ tree_id) {
@@ -1399,6 +1721,140 @@ void organic_draw_branches(
                     }
                 }
         }
+
+    // Nothing may be printed on thin air. A branch clipped where it passes through
+    // the object, or one whose descent got stuck, leaves support islands that start
+    // mid-air; printed, they fall off or get knocked loose and crash the print.
+    // Walk up the layers. An island that doesn't rest on the bed, on the object or on
+    // support one layer below gets a column dropped under it, down to whatever is below:
+    // the bed, the object (keeping the bottom Z gap) or support already standing. Only
+    // islands too small to matter, or ones that could only land on the object when
+    // support may not rest on it, are removed.
+    {
+        // Contact layers and the interface layers under them are stored apart from the branch slices.
+        const std::array<SupportGeneratorLayersPtr*, 3> roof_layers {
+            &top_contacts, &interface_placer.top_interfaces_mutable(), &interface_placer.top_base_interfaces_mutable() };
+        for (const SupportGeneratorLayersPtr *layers : roof_layers)
+            if (slices.size() < layers->size())
+                slices.resize(layers->size());
+        const size_t num_layers   = slices.size();
+        const double min_overlap  = sqr(double(config.support_line_width));
+        const float  touch        = float(0.5 * config.support_line_width);
+        const int    gap_layers   = int(config.z_distance_bottom_layers);
+        // Object at layer_idx plus the bottom Z gap above it: support may rest on top of this.
+        std::vector<std::optional<Polygons>> object_below_cache(num_layers);
+        auto object_below = [&volumes, gap_layers, &object_below_cache](LayerIndex layer_idx) -> const Polygons& {
+            std::optional<Polygons> &out = object_below_cache[layer_idx];
+            if (! out) {
+                Polygons polygons;
+                for (LayerIndex i = std::max<LayerIndex>(0, layer_idx - gap_layers); i <= layer_idx; ++ i)
+                    append(polygons, volumes.getCollision(0, i, false));
+                out = union_(polygons);
+            }
+            return *out;
+        };
+        auto roof_at = [&roof_layers](size_t layer_idx, auto &&fn) {
+            for (SupportGeneratorLayersPtr *layers : roof_layers)
+                if (layer_idx < layers->size() && (*layers)[layer_idx])
+                    fn((*layers)[layer_idx]->polygons);
+        };
+        auto support_at = [&slices, &roof_at](size_t layer_idx) {
+            Polygons out = slices[layer_idx].polygons;
+            append(out, slices[layer_idx].bottom_contacts);
+            roof_at(layer_idx, [&out](const Polygons &roof) { append(out, roof); });
+            return out;
+        };
+        size_t num_extended = 0;
+        size_t num_dropped  = 0;
+        Polygons kept_below;
+        for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
+            Slice   &slice = slices[layer_idx];
+            Polygons all   = support_at(layer_idx);
+            if (all.empty()) {
+                kept_below.clear();
+                continue;
+            }
+            if (layer_idx == 0) {
+                kept_below = union_(all);
+                continue;
+            }
+            Polygons below = kept_below;
+            append(below, object_below(LayerIndex(layer_idx) - 1));
+            below = expand(union_(below), touch);
+            Polygons     kept;
+            const size_t num_dropped_before = num_dropped;
+            for (ExPolygon &island : union_ex(all)) {
+                Polygons island_polygons = Algorithms::ExPolygon::to_polygons(std::move(island));
+                double   island_area     = Algorithms::Polygon::area(island_polygons);
+                double   held            = Algorithms::Polygon::area(intersection_clipped(island_polygons, below));
+                if (held >= std::min(min_overlap, 0.5 * island_area)) {
+                    append(kept, std::move(island_polygons));
+                    continue;
+                }
+                // Floating. Drop a column under it, layer by layer, until it lands on something.
+                std::vector<Polygons> column;
+                Polygons              col       = island_polygons;
+                bool                  on_object = false;
+                for (LayerIndex l = LayerIndex(layer_idx) - 1; l >= 0; -- l) {
+                    // Part of the column above the object (with the Z gap) rests there and stops.
+                    Polygons next = diff_clipped(col, object_below(l));
+                    if (Algorithms::Polygon::area(next) < Algorithms::Polygon::area(col) - EPSILON)
+                        on_object = true;
+                    col = std::move(next);
+                    if (Algorithms::Polygon::area(col) < min_overlap)
+                        break;
+                    // Landed on support already standing at this layer.
+                    Polygons existing = support_at(size_t(l));
+                    double   area     = Algorithms::Polygon::area(col);
+                    if (Algorithms::Polygon::area(intersection_clipped(col, existing)) >= std::min(min_overlap, 0.5 * area))
+                        break;
+                    column.emplace_back(col);
+                    if (l == 0)
+                        break;
+                }
+                if (island_area < 2. * min_overlap || (on_object && ! config.support_rests_on_model)) {
+                    ++ num_dropped;
+                    continue;
+                }
+                for (size_t i = 0; i < column.size(); ++ i) {
+                    Slice &dst = slices[layer_idx - 1 - i];
+                    append(dst.polygons, std::move(column[i]));
+                    dst.polygons = union_(dst.polygons);
+                }
+                ++ num_extended;
+                append(kept, std::move(island_polygons));
+            }
+            if (kept.empty()) {
+                slice.polygons.clear();
+                slice.bottom_contacts.clear();
+                roof_at(layer_idx, [](Polygons &roof) { roof.clear(); });
+            } else if (num_dropped > num_dropped_before) {
+                slice.polygons = intersection(slice.polygons, kept);
+                slice.bottom_contacts = intersection(slice.bottom_contacts, kept);
+                roof_at(layer_idx, [&kept](Polygons &roof) { roof = intersection(roof, kept); });
+            }
+            kept_below = std::move(kept);
+            throw_on_cancel();
+        }
+        if (print_stats)
+            std::fprintf(stderr, "organic-stats: floating islands extended down %zu, removed %zu\n", num_extended, num_dropped);
+        if (const char *path = std::getenv("PRUSASLICER_EXPORT_ORGANIC_STL"); path && num_layers > 0) {
+            std::vector<ExPolygons> layers(num_layers);
+            std::vector<float>      grid(num_layers);
+            for (size_t layer_idx = 0; layer_idx < num_layers; ++ layer_idx) {
+                // 0.05 mm simplification keeps the mesh a manageable size for importing.
+                layers[layer_idx] = Algorithms::ExPolygon::simplify(union_ex(support_at(layer_idx)), scaled<double>(0.05));
+                grid[layer_idx]   = float(layer_z(slicing_params, config, layer_idx));
+            }
+            indexed_triangle_set mesh = slices_to_mesh(layers, slicing_params.object_print_z_min, grid);
+            its_split_t_junctions(mesh);
+            OrganicMeshExport support_export;
+            support_export.add(mesh);
+            support_export.write(path, unscaled<double>(print_object.instances().front().shift()));
+        }
+        if (num_dropped > 0)
+            SPDLOG_WARN("Organic supports: removed {} support islands with nothing under them; the overhangs they held are unsupported.", num_dropped);
+    }
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, std::min(move_bounds.size(), slices.size()), 1),
         [&print_object, &config, &slices, &bottom_contacts, &top_contacts, &intermediate_layers, &layer_storage, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {

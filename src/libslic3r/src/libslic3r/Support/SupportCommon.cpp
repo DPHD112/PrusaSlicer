@@ -1947,6 +1947,19 @@ void generate_support_toolpaths(
                     no_sort = true;
                 } else if (config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic) {
                     tree_supports_generate_paths(base_layer.extrusions, base_layer.polygons_to_extrude(), flow, support_params);
+                    // Organic branches print as one or two loops with nothing inside. Where branches merge
+                    // into a wide area, a loop printed inside it on a later layer (around a hole or a
+                    // notch) would start in mid-air, so fill the inside of wide areas with the regular
+                    // sparse support infill. Narrow branches are left as they are.
+                    if (density > 0.f && config.get<bool>("support_tree_fill_inside")) {
+                        const float  inset         = float(2.5 * flow.scaled_spacing());
+                        const double line_distance = scaled<double>(filler->spacing / density);
+                        ExPolygons   inside        = opening_ex(offset_ex(base_layer.polygons_to_extrude(), - inset), float(0.25 * line_distance));
+                        inside.erase(std::remove_if(inside.begin(), inside.end(),
+                            [line_distance](const ExPolygon &expoly) { return expoly.area() < sqr(line_distance); }), inside.end());
+                        if (! inside.empty())
+                            fill_expolygons_generate_paths(base_layer.extrusions, std::move(inside), filler, density, ExtrusionRole::SupportMaterial, flow);
+                    }
                     done = true;
                 }
                 if (! done)

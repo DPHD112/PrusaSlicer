@@ -293,4 +293,6 @@ add_subdirectory(src)
 
 if(SLIC3R_BUILD_TESTS)
     add_subdirectory(tests)
+    # Headless slicing driver for checking organic supports, built on the test helpers.
+    add_subdirectory(sandboxes/organic_check)
 endif()

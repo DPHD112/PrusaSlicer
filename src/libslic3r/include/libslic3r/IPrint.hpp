@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <functional>
 #include <optional>
 #include <variant>
@@ -69,6 +70,8 @@ public:
         std::optional<SliceUntilStep> slice_until_step
     )                          = 0;
     virtual bool empty() const = 0;
+    // Writes the generated support of a finished slice to a binary STL. False if there is none.
+    virtual bool export_support_stl(const std::string & /* path */) const { return false; }
     virtual ~IPrint()          = default;
 
     JThread::StopToken stop_token;
