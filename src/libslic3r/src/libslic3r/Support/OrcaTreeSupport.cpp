@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -412,6 +413,7 @@ private:
     void drop_nodes();
     void smooth_nodes();
     std::vector<LayerAreas> draw_circles();
+    void fill_floating_islands(std::vector<LayerAreas> &layers) const;
 
     SupportNode* create_node(const Point &position, int distance_to_top, int obj_layer_nr, int support_roof_layers_below, bool to_buildplate,
         SupportNode *parent, coordf_t print_z, coordf_t height, coordf_t dist_mm_to_top = 0, coordf_t radius = 0);
@@ -461,9 +463,10 @@ OrcaTreeSupport::OrcaTreeSupport(const PrintObject &object, bool is_slim, bool i
     m_point_spread       = std::max(0.5, config.get<double>("support_tree_orca_branch_distance"));
     m_diameter_angle_scale_factor = std::clamp<double>(config.get<double>("support_tree_branch_diameter_angle") * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
     m_branch_angle       = std::clamp<double>(config.get<double>("support_tree_angle") * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
-    m_roof_layers        = m_support_params.num_top_interface_layers;
+    // SupportParameters counts the interface layers without the contact layer, Orca counts all of them.
+    m_roof_layers        = m_support_params.has_top_contacts ? m_support_params.num_top_interface_layers + 1 : 0;
     m_top_base_interface_layers = std::min<int>(int(m_support_params.num_top_base_interface_layers), m_roof_layers > 0 ? int(m_roof_layers) - 1 : 0);
-    m_bottom_interface_layers   = m_support_params.num_bottom_interface_layers;
+    m_bottom_interface_layers   = m_support_params.has_bottom_contacts ? m_support_params.num_bottom_interface_layers + 1 : 0;
 
     // Layer outlines used for the collision and avoidance areas.
     m_layer_outlines.assign(m_layer_count, ExPolygons());
@@ -1674,6 +1677,111 @@ std::vector<LayerAreas> OrcaTreeSupport::draw_circles()
     return out;
 }
 
+// Nothing may be printed on thin air (fork addition, as for Organic supports). A branch clipped
+// where it meets the object, or one pruned on its way down, can leave support islands with
+// nothing under them. Walk up the layers: an island that doesn't rest on the bed, on the object
+// or on support one layer below gets a column dropped under it, down to the bed, the object
+// (keeping the bottom Z gap) or support already standing. Only islands too small to matter, or
+// ones that could only land on the object with support on the build plate only, are removed.
+void OrcaTreeSupport::fill_floating_islands(std::vector<LayerAreas> &layers) const
+{
+    const size_t num_layers = layers.size();
+    if (num_layers < 2)
+        return;
+    const double min_overlap = sqr(scale_(m_support_line_width));
+    const float  touch       = float(scale_(0.5 * m_support_line_width));
+    const int    gap_layers  = m_bottom_gap > EPSILON ? std::max(1, int(std::round(m_bottom_gap / m_layer_height))) : 0;
+    // Object at layer_nr and the bottom Z gap above it: support may rest on top of this.
+    // With the XY distance added, for the columns to keep clear of the object's sides.
+    std::vector<std::optional<ExPolygons>> object_below_cache(num_layers), object_below_xy_cache(num_layers);
+    auto object_below_impl = [&](size_t layer_nr, bool with_xy) -> const ExPolygons& {
+        std::optional<ExPolygons> &out = (with_xy ? object_below_xy_cache : object_below_cache)[layer_nr];
+        if (! out) {
+            ExPolygons expolys;
+            for (int i = std::max(0, int(layer_nr) - gap_layers); i <= int(layer_nr); ++ i)
+                append(expolys, with_xy ? get_collision(0, size_t(i)) : m_layer_outlines[i]);
+            out = union_ex(expolys);
+        }
+        return *out;
+    };
+    auto object_below    = [&](size_t layer_nr) -> const ExPolygons& { return object_below_impl(layer_nr, false); };
+    auto object_below_xy = [&](size_t layer_nr) -> const ExPolygons& { return object_below_impl(layer_nr, true); };
+    auto support_at = [&layers](size_t layer_nr) {
+        const LayerAreas &la = layers[layer_nr];
+        ExPolygons out = la.base;
+        append(out, la.roof);
+        append(out, la.roof_base);
+        append(out, la.floor);
+        return out;
+    };
+
+    size_t     num_extended = 0;
+    size_t     num_dropped  = 0;
+    ExPolygons kept_below;
+    for (size_t layer_nr = 0; layer_nr < num_layers; ++ layer_nr) {
+        ExPolygons all = union_ex(support_at(layer_nr));
+        if (all.empty() || layer_nr == 0) {
+            kept_below = std::move(all);
+            continue;
+        }
+        ExPolygons below = kept_below;
+        append(below, object_below(layer_nr - 1));
+        below = offset_ex(union_ex(below), touch);
+        ExPolygons   kept;
+        const size_t num_dropped_before = num_dropped;
+        for (ExPolygon &island : all) {
+            const double island_area = ExPoly::area(island);
+            const double held        = ExPoly::area(intersection_ex(ExPolygons{ island }, below));
+            if (held >= std::min(min_overlap, 0.5 * island_area)) {
+                kept.emplace_back(std::move(island));
+                continue;
+            }
+            // Floating. Drop a column under it, layer by layer, until it lands on something.
+            std::vector<ExPolygons> column;
+            ExPolygons              col { island };
+            bool                    on_object = false;
+            for (int l = int(layer_nr) - 1; l >= 0; -- l) {
+                // Part of the column above the object (with the Z gap) rests there and stops.
+                ExPolygons next = diff_ex(col, object_below_xy(size_t(l)));
+                if (ExPoly::area(next) < ExPoly::area(col) - EPSILON)
+                    on_object = true;
+                col = std::move(next);
+                const double area = ExPoly::area(col);
+                if (area < min_overlap)
+                    break;
+                // Landed on support already standing at this layer.
+                if (ExPoly::area(intersection_ex(col, support_at(size_t(l)))) >= std::min(min_overlap, 0.5 * area))
+                    break;
+                column.emplace_back(col);
+            }
+            if (island_area < 2. * min_overlap || (on_object && m_buildplate_only)) {
+                ++ num_dropped;
+                continue;
+            }
+            for (size_t i = 0; i < column.size(); ++ i) {
+                ExPolygons &dst = layers[layer_nr - 1 - i].base;
+                append(dst, std::move(column[i]));
+                dst = union_ex(dst);
+            }
+            ++ num_extended;
+            kept.emplace_back(std::move(island));
+        }
+        if (num_dropped > num_dropped_before) {
+            LayerAreas &la = layers[layer_nr];
+            la.base      = intersection_ex(la.base, kept);
+            la.roof      = intersection_ex(la.roof, kept);
+            la.roof_base = intersection_ex(la.roof_base, kept);
+            la.floor     = intersection_ex(la.floor, kept);
+        }
+        kept_below = std::move(kept);
+        m_throw_on_cancel();
+    }
+    if (std::getenv("PRUSASLICER_ORGANIC_STATS"))
+        std::fprintf(stderr, "orca-tree-stats: floating islands extended down %zu, removed %zu\n", num_extended, num_dropped);
+    if (num_dropped > 0)
+        SPDLOG_WARN("Tree supports: removed {} support islands with nothing under them; the overhangs they held are unsupported.", num_dropped);
+}
+
 std::vector<LayerAreas> OrcaTreeSupport::generate()
 {
     detect_overhangs();
@@ -1683,7 +1791,9 @@ std::vector<LayerAreas> OrcaTreeSupport::generate()
     plan_layer_heights();
     drop_nodes();
     smooth_nodes();
-    return draw_circles();
+    std::vector<LayerAreas> out = draw_circles();
+    fill_floating_islands(out);
+    return out;
 }
 
 } // namespace
@@ -1729,6 +1839,29 @@ void orca_tree_support_generate(PrintObject &print_object, std::function<void()>
     }
     if (intermediate_layers.empty() && interface_layers.empty() && base_interface_layers.empty() && slicing_params.raft_layers() == 0)
         return;
+
+    if (slicing_params.raft_layers() > 0 && print_object.layer_count() > 0) {
+        // The raft contact layer under the object's first layer and the support standing on it.
+        // generate_raft_base() builds the raft layers below it.
+        ExPolygons raft = print_object.get_layer(0)->lslices;
+        if (! areas.empty()) {
+            const LayerAreas &la = areas.front();
+            append(raft, la.base);
+            append(raft, la.roof);
+            append(raft, la.roof_base);
+            append(raft, la.floor);
+        }
+        Polygons     polygons  = ExPoly::to_polygons(union_ex(raft));
+        const double expansion = print_object.config().get<double>("raft_expansion");
+        if (expansion > 0)
+            polygons = expand(polygons, scaled<float>(expansion));
+        SupportGeneratorLayer &contact = layer_storage.allocate_unguarded(SupporLayerType::TopContact);
+        contact.print_z  = slicing_params.raft_contact_top_z;
+        contact.height   = slicing_params.contact_raft_layer_height;
+        contact.bottom_z = contact.print_z - contact.height;
+        contact.polygons = std::move(polygons);
+        top_contacts.push_back(&contact);
+    }
 
     SupportGeneratorLayersPtr raft_layers = generate_raft_base(print_object, support_params, slicing_params,
         top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
