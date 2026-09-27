@@ -1080,9 +1080,9 @@ struct OrganicMeshExport {
             for (int i = 0; i < 3; ++ i)
                 tris.push_back(its.vertices[f[i]]);
     }
-    void write(const char *path, const Vec2d &shift) const {
+    bool write(const char *path, const Vec2d &shift) const {
         FILE *f = std::fopen(path, "wb");
-        if (! f) return;
+        if (! f) return false;
         char header[80] = "PrusaSlicer organic supports";
         std::fwrite(header, 1, 80, f);
         uint32_t n = uint32_t(tris.size() / 3);
@@ -1098,7 +1098,7 @@ struct OrganicMeshExport {
             std::fwrite(rec, 4, 12, f);
             std::fwrite(&attr, 2, 1, f);
         }
-        std::fclose(f);
+        return std::fclose(f) == 0;
     }
 };
 
@@ -1248,6 +1248,45 @@ static void its_split_t_junctions(indexed_triangle_set &its)
         its.indices.insert(its.indices.end(), fan.begin() + 1, fan.end());
     }
 }
+
+} // namespace
+
+// Writes the support of every object of a sliced print to a binary STL, placed as printed
+// on the bed: one layered solid per object copy. Works for any support style.
+bool export_support_stl(const Print &print, const std::string &path)
+{
+    OrganicMeshExport support_export;
+    size_t num_triangles = 0;
+    for (const PrintObject *print_object : print.objects()) {
+        std::vector<ExPolygons> layers;
+        std::vector<float>      grid;
+        double                  zmin = 0;
+        for (const SupportLayer *layer : print_object->support_layers()) {
+            if (layers.empty())
+                zmin = layer->print_z - layer->height;
+            // 0.05 mm simplification keeps the mesh a manageable size for importing.
+            layers.emplace_back(Algorithms::ExPolygon::simplify(layer->support_islands, scaled<double>(0.05)));
+            grid.emplace_back(float(layer->print_z));
+        }
+        if (layers.empty())
+            continue;
+        indexed_triangle_set mesh = slices_to_mesh(layers, zmin, grid);
+        its_split_t_junctions(mesh);
+        for (const PrintInstance &instance : print_object->instances()) {
+            indexed_triangle_set copy = mesh;
+            const Vec2f shift = unscaled<double>(instance.shift()).cast<float>();
+            for (stl_vertex &v : copy.vertices)
+                v.head<2>() += shift;
+            support_export.add(copy);
+            num_triangles += copy.indices.size();
+        }
+    }
+    if (num_triangles == 0)
+        return false;
+    return support_export.write(path.c_str(), Vec2d::Zero());
+}
+
+namespace {
 
 // Organic support diagnostics (fork addition). When PRUSASLICER_ORGANIC_STATS is set,
 // report to stderr how much of the branch tubes had to be clipped away because they

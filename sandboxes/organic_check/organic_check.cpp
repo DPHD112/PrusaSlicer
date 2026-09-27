@@ -76,6 +76,10 @@ int main(int argc, char **argv)
     Test::init_print({ *mesh }, print, model, config);
     std::string gcode = Test::gcode(print);
 
+    // Same export as the GUI's File > Export > Export Support as STL.
+    if (const char *path = std::getenv("ORGANIC_CHECK_SUPPORT_STL"); path && ! print.export_support_stl(path))
+        std::fprintf(stderr, "no support exported to %s\n", path);
+
     boost::nowide::ofstream out(argv[2]);
     out << gcode;
     return out ? 0 : 1;

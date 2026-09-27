@@ -24,6 +24,11 @@ Slice each shape, then run the checker on the G-code:
     PRUSASLICER_ORGANIC_STATS=1 organic_check shapes/roof_over_dome.stl shapes/roof_over_dome.gcode
     python3 check_floating.py shapes/roof_over_dome.gcode
 
+In the slicer, File > Export > Export Support as STL saves the support of the sliced
+bed, and Print Settings > Support > Organic supports > "Fill inside of wide areas" turns
+the sparse infill inside wide organic areas on or off (on by default; set
+`support_tree_fill_inside=0` to turn it off in organic_check).
+
 Environment variables, read while slicing (by `organic_check` or the slicer):
 
 - `PRUSASLICER_ORGANIC_STATS=1` prints how many branches came within the XY or Z
@@ -35,5 +40,9 @@ Environment variables, read while slicing (by `organic_check` or the slicer):
   G-code, to import into another slicer next to the part. The mesh is closed apart
   from a few hundred sliver edges out of several hundred thousand, which slicers
   repair on import.
+- `ORGANIC_CHECK_SUPPORT_STL=supports.stl` (organic_check only) writes the same export as
+  the slicer's File > Export > Export Support as STL, built from the finished support
+  layers of every object and copy, for any support style. It matches the environment
+  variable export above, except that it also has the wider first layers as printed.
 - `PRUSASLICER_EXPORT_ORGANIC_TUBES_STL=tubes.stl` writes the raw smooth branch
   tubes before they are clipped against the part, for debugging.

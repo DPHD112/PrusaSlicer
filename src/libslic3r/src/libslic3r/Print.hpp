@@ -558,6 +558,7 @@ public:
     // a cancellation callback is executed to stop the background processing before the operation.
     void                clear() override;
     bool                empty() const override { return m_objects.empty(); }
+    bool                export_support_stl(const std::string &path) const override;
     // List of existing PrintObject IDs, to remove notifications for non-existent IDs.
     std::vector<Domain::ObjectID> print_object_ids() const override;
 

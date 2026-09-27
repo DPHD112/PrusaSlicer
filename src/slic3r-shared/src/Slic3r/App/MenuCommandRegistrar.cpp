@@ -2175,7 +2175,45 @@ void MenuCommandRegistrar::register_file_menu_export_commands()
                     }
                 }
             )
+        )
+        // File -> Export -> Export Support as STL
+        .register_menu_item(
+            {MenuItemName::FileMenu, MenuItemName::Export, MenuItemName::ExportSupportStl},
+            std::make_unique<UIItemCommand>(
+                CommandName::ExportSupportStl,
+                [this]() { this->export_support_stl(); },
+                UIItemCommandExtraOpts{
+                    .enabled = [this]() { return ExportActions::can_export(m_project_interactor); }
+                }
+            )
         );
+}
+
+void MenuCommandRegistrar::export_support_stl()
+{
+    IDialogManager::FileCallback callback =
+        [this](const bool success, const std::vector<boost::filesystem::path>& file_paths)
+    {
+        if (!success || file_paths.empty()) {
+            return;
+        }
+        if (!m_project_interactor.slicing_interactor().export_support_stl(
+                m_project_interactor.selected_bed_slicing_id(), file_paths.front().string())) {
+            AppServices::instance().dialog_manager().show_warning_dialog(
+                _u8L("There is no support in the sliced result to export, or the file could not be written."),
+                _u8L("Export Support as STL")
+            );
+        }
+    };
+
+    AppServices::instance().dialog_manager().show_file_dialog(
+        FileDialogType::Save,
+        _u8L("Export Support as STL"),
+        this->default_dialog_folder(),
+        "support.stl",
+        Wildcards::generate_wildcards(Wildcards::TypeFlag::Stl, Wildcards::TypeFlag::Stl),
+        callback
+    );
 }
 
 void MenuCommandRegistrar::register_file_menu_commands()

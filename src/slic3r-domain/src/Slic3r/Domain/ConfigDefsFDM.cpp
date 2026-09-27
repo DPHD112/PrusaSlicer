@@ -4457,6 +4457,21 @@ void fdm_config_init_fn(ConfigDefinitions& defs)
     def->max_literal = 35;
     def->init_fn = init_with(Percentage{15.});
 
+    def = defs.add("support_tree_fill_inside", typeid(bool));
+    def->location = Print;
+    def->compatibility_rule = CompatibilityRule::IgnoreOverrides;
+    def->overrides_in = Locations{ Tool, Object };
+    def->label = L("Fill inside of wide areas");
+    def->option_group = ConfigItemDef::OptionGroup::Print_Supports_OrganicSupports;
+    def->category = ConfigItemDef::Category::Print_Supports;
+    def->order = 9;
+    def->gui_type = ConfigItemDef::GUIType::checkbox;
+    // TRN PrintSettings: "Organic supports" > "Fill inside of wide areas"
+    def->tooltip = L("Print sparse infill inside wide organic support areas, where branches merge, instead of only their outline. "
+                     "Without it, branches starting above such an area can be printed over its empty inside. "
+                     "Uses a little more support material.");
+    def->init_fn = init_with(true);
+
     def = defs.add("temperature", typeid(int));
     def->location = Filament;
     def->label = L("Nozzle other layers");

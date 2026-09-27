@@ -128,6 +128,8 @@ public:
         std::optional<SliceUntilStep> slice_until_step = std::nullopt
     );
     void stop_slicing_bed(const Domain::SlicingId slicing_id);
+    // Writes the support of a finished slice to a binary STL. False if there is none.
+    bool export_support_stl(const Domain::SlicingId slicing_id, const std::string& path);
     void slice_all();
     void stop_all();
     void enable_auto_slicing(Domain::SlicingId slicing_id);
