@@ -1945,7 +1945,9 @@ void generate_support_toolpaths(
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     sheath  = true;
                     no_sort = true;
-                } else if (config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic) {
+                } else if (const auto style = config.get<Domain::SupportMaterialStyle>("support_material_style");
+                           style == Domain::SupportMaterialStyle::smsOrganic || style == Domain::SupportMaterialStyle::smsTreeSlim ||
+                           style == Domain::SupportMaterialStyle::smsTreeHybrid) {
                     tree_supports_generate_paths(base_layer.extrusions, base_layer.polygons_to_extrude(), flow, support_params);
                     // Organic branches print as one or two loops with nothing inside. Where branches merge
                     // into a wide area, a loop printed inside it on a later layer (around a hole or a

@@ -1013,9 +1013,12 @@ DONE:;
                     // Notify the user that printing supports with different nozzle diameters is experimental and requires caution.
                     warnings.emplace_back(Warning{WarningCode::SupportNozzleDiameterDiffer});
                 }
-                if (this->can_have_wipe_tower()
-                    && object->config().get<Domain::SupportMaterialStyle>("support_material_style")
-                        != Domain::SupportMaterialStyle::smsOrganic)
+                // Organic and the OrcaSlicer tree styles print their support on the object layers.
+                if (const auto support_style = object->config().get<Domain::SupportMaterialStyle>("support_material_style");
+                    this->can_have_wipe_tower()
+                    && support_style != Domain::SupportMaterialStyle::smsOrganic
+                    && support_style != Domain::SupportMaterialStyle::smsTreeSlim
+                    && support_style != Domain::SupportMaterialStyle::smsTreeHybrid)
                 {
                     if (object->config().get<double>("support_material_contact_distance") == 0) {
                         // Soluble interface

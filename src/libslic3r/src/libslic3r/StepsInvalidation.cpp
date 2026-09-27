@@ -503,6 +503,8 @@ const std::map<std::string, std::vector<Step>> invalidated_by{
     {"support_tree_tip_diameter", steps({propagate(posSupportMaterial)})},
     {"support_tree_top_rate", steps({propagate(posSupportMaterial)})},
     {"support_tree_fill_inside", steps({propagate(posSupportMaterial)})},
+    {"support_tree_orca_branch_diameter", steps({propagate(posSupportMaterial)})},
+    {"support_tree_orca_branch_distance", steps({propagate(posSupportMaterial)})},
     {"temperature", steps({propagate(psWipeTower), propagate(psSkirtBrim)})},
     {"template_custom_gcode", steps({propagate(psGCodeExport)})},
     {"thick_bridges", steps({propagate(posPerimeters), propagate(posSupportMaterial)})},

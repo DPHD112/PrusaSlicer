@@ -42,6 +42,7 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Support/SupportMaterial.hpp"
 #include "libslic3r/Support/TreeSupport.hpp"
+#include "libslic3r/Support/OrcaTreeSupport.hpp"
 #include "libslic3r/Surface.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
@@ -2992,7 +2993,11 @@ void PrintObject::combine_infill()
 
 void PrintObject::_generate_support_material()
 {
-    if (this->has_support() &&
+    const auto support_style = m_config.get<Domain::SupportMaterialStyle>("support_material_style");
+    if (support_style == Domain::SupportMaterialStyle::smsTreeSlim || support_style == Domain::SupportMaterialStyle::smsTreeHybrid) {
+        // Tree supports ported from OrcaSlicer. Builds the raft too when there is one.
+        FFFTreeSupport::orca_tree_support_generate(*this, std::function<void()>([this](){ this->throw_if_canceled(); }));
+    } else if (this->has_support() &&
         (m_config.get<Domain::SupportMaterialStyle>("support_material_style"
          ) == Domain::SupportMaterialStyle::smsTree ||
          m_config.get<Domain::SupportMaterialStyle>("support_material_style"
