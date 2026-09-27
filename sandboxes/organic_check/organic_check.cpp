@@ -39,7 +39,11 @@ static bool set_option(Test::TestConfig &config, const std::string &arg)
         item.set(Domain::Percentage{ std::stod(value) });
     else if (item.holds_alternative<Domain::FloatOrPercentage>())
         item.set(percent ? Domain::FloatOrPercentage{ Domain::Percentage{ std::stod(value) } } : Domain::FloatOrPercentage{ std::stod(value) });
-    else
+    else if (item.holds_alternative<Domain::EnumWrapper>()) {
+        Domain::EnumWrapper e = item.value().get<Domain::EnumWrapper>();
+        e.set_string(value);
+        item.set(e);
+    } else
         return false;
     return true;
 }

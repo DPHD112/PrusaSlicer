@@ -563,6 +563,48 @@ void fdm_config_init_fn(ConfigDefinitions& defs)
          {int(BrimType::OuterAndInner), "outer_and_inner", L("Outer and inner brim")}}
     );
 
+    def = defs.add("brim_ears", typeid(bool));
+    def->location = Print;
+    def->overrides_in = Locations{ Object };
+    def->label = L("Mouse ears");
+    def->option_group = ConfigItemDef::OptionGroup::Print_BedAdhesion_Brim;
+    def->category = ConfigItemDef::Category::Print_BedAdhesion;
+    def->order = 3;
+    def->gui_type = ConfigItemDef::GUIType::checkbox;
+    def->tooltip = L("Print the outer brim only as round ears at the sharp outer corners of the first layer, "
+                     "where parts tend to lift, instead of all around the object. The ear radius is the brim width. "
+                     "Needs an outer brim type.");
+    def->init_fn = init_with(false);
+
+    def = defs.add("brim_ears_max_angle", typeid(double));
+    def->location = Print;
+    def->overrides_in = Locations{ Object };
+    def->label = L("Mouse ear max angle");
+    def->option_group = ConfigItemDef::OptionGroup::Print_BedAdhesion_Brim;
+    def->category = ConfigItemDef::Category::Print_BedAdhesion;
+    def->order = 4;
+    def->gui_type = ConfigItemDef::GUIType::textfield;
+    def->tooltip = L("Corners sharper than this angle get a mouse ear. 180 puts ears at every convex corner, "
+                     "90 only at right angles and sharper.");
+    def->units = {L("°")};
+    def->min = 0;
+    def->max = 180;
+    def->init_fn = init_with(125.);
+
+    def = defs.add("brim_ears_detection_length", typeid(double));
+    def->location = Print;
+    def->overrides_in = Locations{ Object };
+    def->label = L("Mouse ear detection length");
+    def->option_group = ConfigItemDef::OptionGroup::Print_BedAdhesion_Brim;
+    def->category = ConfigItemDef::Category::Print_BedAdhesion;
+    def->order = 5;
+    def->gui_type = ConfigItemDef::GUIType::textfield;
+    def->tooltip = L("The first layer outline is simplified by this distance before looking for corners, "
+                     "so that curves made of many short segments count as one corner. 0 uses the outline as is.");
+    def->units = {L("mm")};
+    def->min = 0;
+    def->init_fn = init_with(1.);
+
     def = defs.add("brim_separation", typeid(double));
     def->location = Print;
     def->compatibility_rule = CompatibilityRule::Average;
