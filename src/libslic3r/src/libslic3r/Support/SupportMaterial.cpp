@@ -721,6 +721,8 @@ public:
         }
         case Domain::SupportMaterialStyle::smsTree:
         case Domain::SupportMaterialStyle::smsOrganic:
+        case Domain::SupportMaterialStyle::smsOrganicSlim:
+        case Domain::SupportMaterialStyle::smsOrganicHybrid:
 //            assert(false);
             [[fallthrough]];
         case Domain::SupportMaterialStyle::smsSnug:

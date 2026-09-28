@@ -2995,8 +2995,7 @@ void PrintObject::_generate_support_material()
     if (this->has_support() &&
         (m_config.get<Domain::SupportMaterialStyle>("support_material_style"
          ) == Domain::SupportMaterialStyle::smsTree ||
-         m_config.get<Domain::SupportMaterialStyle>("support_material_style"
-         ) == Domain::SupportMaterialStyle::smsOrganic)) {
+         Domain::is_organic_support_style(m_config.get<Domain::SupportMaterialStyle>("support_material_style")))) {
         fff_tree_support_generate(*this, std::function<void()>([this](){ this->throw_if_canceled(); }));
     } else {
         // If support style is set to Organic however only raft will be built but no support,

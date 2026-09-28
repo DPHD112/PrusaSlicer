@@ -1321,6 +1321,8 @@ void organic_draw_branches(
     TreeModelVolumes                &volumes, 
     const TreeSupportSettings       &config,
     std::vector<SupportElements>    &move_bounds,
+    // Organic Hybrid: cross-sections of the support columns per layer, empty otherwise.
+    const std::vector<Polygons>     &columns,
 
     // I/O:
     SupportGeneratorLayersPtr       &bottom_contacts,
@@ -1720,6 +1722,16 @@ void organic_draw_branches(
                         dst.bottom_contacts = std::move(src.bottom_contacts);
                     }
                 }
+        }
+    // Organic Hybrid: add the straight columns under big flat overhangs. They go through the same
+    // floating check and output as the branches.
+    if (slices.size() < columns.size())
+        slices.resize(columns.size());
+    for (size_t layer_idx = 0; layer_idx < columns.size(); ++ layer_idx)
+        if (! columns[layer_idx].empty()) {
+            Slice &dst = slices[layer_idx];
+            append(dst.polygons, columns[layer_idx]);
+            ++ dst.num_branches;
         }
 
     // Nothing may be printed on thin air. A branch clipped where it passes through

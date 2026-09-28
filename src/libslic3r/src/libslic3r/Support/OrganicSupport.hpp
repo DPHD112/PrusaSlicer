@@ -32,6 +32,8 @@ void organic_draw_branches(
     TreeModelVolumes                &volumes, 
     const TreeSupportSettings       &config,
     std::vector<SupportElements>    &move_bounds,
+    // Organic Hybrid: cross-sections of the support columns per layer, empty otherwise.
+    const std::vector<Polygons>     &columns,
 
     // I/O:
     SupportGeneratorLayersPtr       &bottom_contacts,
