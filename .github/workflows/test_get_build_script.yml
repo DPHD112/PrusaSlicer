@@ -1,0 +1,157 @@
+# Tries tools/get-prusaslicer-build.cmd on a real Windows machine: it should
+# fetch builds of the organic Windows workflow, open them, and leave no
+# "downloaded from the internet" tag (Zone.Identifier stream) on any file.
+# The steps never fail the run; each prints RESULT lines to read in the log.
+name: Test build download script
+
+on:
+  push:
+    branches: [claude/project-thread-n0gji9]
+    paths:
+      - tools/get-prusaslicer-build.cmd
+      - .github/workflows/test_get_build_script.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SCRIPT: ${{ github.workspace }}\tools\get-prusaslicer-build.cmd
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up helpers
+        shell: pwsh
+        run: |
+          gh --version
+          $b = Join-Path $env:RUNNER_TEMP 'Test User\PrusaSlicer-builds'
+          # Stops whatever the script launched from the builds folder.
+          @'
+          Start-Sleep 8
+          $p = @(Get-Process | Where-Object { $_.Path -like '*PrusaSlicer-builds*' })
+          "RESULT launched and still running: " + (($p | ForEach-Object { $_.Path }) -join ', ')
+          $p | Stop-Process -Force
+          '@ | Set-Content "$env:RUNNER_TEMP\stop-app.ps1"
+          # Lists each build folder, its size, and how many files carry a Zone.Identifier stream.
+          @"
+          Get-ChildItem '$b' -Directory | ForEach-Object {
+            `$f = @(Get-ChildItem `$_.FullName -Recurse -File)
+            `$tagged = @(`$f | Where-Object { Get-Item -LiteralPath `$_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue })
+            'RESULT folder {0}: {1} files, {2:N0} MB, app {3}, build-info {4}, tagged files {5}' -f `$_.Name, `$f.Count, ((`$f | Measure-Object Length -Sum).Sum / 1MB), (Test-Path (Join-Path `$_.FullName 'slic3r-app-launcher.exe')), (Test-Path (Join-Path `$_.FullName 'build-info.txt')), `$tagged.Count
+            Get-Content (Join-Path `$_.FullName 'build-info.txt') -ErrorAction SilentlyContinue | ForEach-Object { '    ' + `$_ }
+          }
+          "@ | Set-Content "$env:RUNNER_TEMP\list-builds.ps1"
+          gh api -X GET repos/DPHD112/PrusaSlicer/actions/artifacts -q '.artifacts[] | [.id, .name, .created_at, .workflow_run.id, .expired] | @tsv'
+
+      - name: 1 newest build, first run
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          pwsh -NoProfile -File "%RUNNER_TEMP%\list-builds.ps1"
+          exit /b 0
+
+      - name: 2 newest build again, should not download
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          exit /b 0
+
+      - name: 3 older build from its run link
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" https://github.com/DPHD112/PrusaSlicer/actions/runs/36300657075 < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          exit /b 0
+
+      - name: 4 artifact link of a build already here, should not download
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" "https://github.com/DPHD112/PrusaSlicer/actions/runs/36351239938/artifacts/10943982599" < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          exit /b 0
+
+      - name: 5 build by bare number
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" 36345804152 < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          exit /b 0
+
+      - name: 6 unfinished download is started over
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          del "%USERPROFILE%\PrusaSlicer-builds\36300657075\build-info.txt"
+          del "%USERPROFILE%\PrusaSlicer-builds\36300657075\*.dll"
+          call "%SCRIPT%" 36300657075 < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          pwsh -NoProfile -File "%RUNNER_TEMP%\stop-app.ps1"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          pwsh -NoProfile -File "%RUNNER_TEMP%\list-builds.ps1"
+          exit /b 0
+
+      - name: 7 run number that doesn't exist
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          call "%SCRIPT%" 123 < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          if exist "%USERPROFILE%\PrusaSlicer-builds\123" (echo RESULT leftover folder 123) else (echo RESULT no leftover folder)
+          exit /b 0
+
+      - name: 8 GitHub CLI missing
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\Test User"
+          set "PATH=%SystemRoot%\system32;%SystemRoot%"
+          call "%SCRIPT%" < nul > "%RUNNER_TEMP%\out.txt" 2>&1
+          set "RC=%ERRORLEVEL%"
+          type "%RUNNER_TEMP%\out.txt"
+          echo RESULT exit code %RC%
+          exit /b 0
+
+      - name: 9 not signed in yet, sign-in starts
+        shell: pwsh
+        run: |
+          Remove-Item Env:\GH_TOKEN
+          $env:USERPROFILE = "$env:RUNNER_TEMP\Test User"
+          $out = "$env:RUNNER_TEMP\out9.txt"
+          $p = Start-Process cmd.exe -ArgumentList "/c `"`"$env:SCRIPT`" < nul > `"$out`" 2>&1`"" -PassThru -WindowStyle Hidden
+          Start-Sleep 25
+          "RESULT script still waiting for sign-in: " + (-not $p.HasExited)
+          Get-Process gh, msedge, chrome, firefox -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep 2
+          # The one-time code is useless once gh is stopped, so it can show in the log.
+          Get-Content $out
+          exit 0
