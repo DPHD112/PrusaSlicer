@@ -81,8 +81,6 @@ enum class SupportMaterialInterfacePattern {
 };
 enum class SupportMaterialStyle {
     smsGrid, smsSnug, smsTree, smsOrganic,
-    // Tree supports ported from OrcaSlicer.
-    smsTreeSlim, smsTreeHybrid,
 };
 enum class PerimeterGeneratorType
 {
