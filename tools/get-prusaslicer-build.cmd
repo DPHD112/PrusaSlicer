@@ -31,7 +31,7 @@ set "GH_PROMPT_DISABLED=1"
 where gh >nul 2>&1 || goto no_gh
 
 gh auth token >nul 2>&1 && goto signed_in
-echo Sign in to GitHub once: type the code shown below into the GitHub page
+echo Sign in to GitHub once: enter the code shown below on the GitHub page
 echo that opens in your browser, then allow GitHub CLI.
 echo.
 start "" "https://github.com/login/device"
@@ -58,9 +58,9 @@ rem build-info.txt is written last, so a folder without it is an unfinished down
 if exist "%DEST%\build-info.txt" goto launch
 if exist "%DEST%" rmdir /s /q "%DEST%"
 mkdir "%DEST%" || goto failed
+gh run view %RUN% --repo %REPO% --json displayTitle,createdAt,url -q ".displayTitle, .createdAt, .url" > "%DEST%\build-info.tmp" || goto failed
 echo Downloading build %RUN% (about 100 MB) into %DEST%
 gh run download %RUN% --repo %REPO% --name %ARTIFACT% --dir "%DEST%" || goto failed
-gh run view %RUN% --repo %REPO% --json displayTitle,createdAt,url -q ".displayTitle, .createdAt, .url" > "%DEST%\build-info.tmp" || goto failed
 ren "%DEST%\build-info.tmp" build-info.txt || goto failed
 
 :launch
