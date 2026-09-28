@@ -168,7 +168,7 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
 #endif // NDEBUG
         // Support must be enabled and set to Tree style.
         assert(object_config.get<Domain::SupportMode>("support_material") != Domain::SupportMode::None || object_config.get<int>("support_material_enforce_layers") > 0);
-        assert(object_config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsTree || object_config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic);
+        assert(object_config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsTree || Domain::is_organic_support_style(object_config.get<Domain::SupportMaterialStyle>("support_material_style")));
 
         bool found_existing_group = false;
         TreeSupportSettings next_settings{ TreeSupportMeshGroupSettings{ print_object }, print_object.slicing_parameters() };
@@ -3424,6 +3424,70 @@ static void draw_areas(
 extern bool g_showed_critical_error;
 extern bool g_showed_performance_warning;
 
+// Organic Hybrid: a big flat overhang with nothing of the object below it gets a straight column of
+// regular support down to the bed instead of tree tips. A column stays outside the
+// object's shadow, that is its outline plus the XY gap on every layer below the overhang, so it
+// can't touch the part on its way down. The column tops are taken out of the overhangs, so no tips
+// are placed there, and they get the same contact and interface layers as the organic roofs.
+// Returns the column cross-sections per support layer, below the interface layers.
+static std::vector<Polygons> generate_hybrid_columns(
+    const PrintObject               &print_object,
+    const TreeModelVolumes          &volumes,
+    const TreeSupportSettings       &config,
+    const size_t                     num_support_layers,
+    std::vector<Polygons>           &overhangs,
+    InterfacePlacer                 &interface_placer,
+    std::function<void()>            throw_on_cancel)
+{
+    const TreeSupportMeshGroupSettings &settings = config.settings;
+    std::vector<Polygons> columns(num_support_layers);
+    if (! settings.organic_hybrid)
+        return columns;
+
+    // The overhang at layer_idx + z_distance_delta is supported by a contact layer at layer_idx.
+    const size_t z_distance_delta = config.z_distance_top_layers + 1;
+    // Like the branches, columns stand on the bed, next to a raft if there is one. Their tops start above the raft contact.
+    const size_t first_layer      = print_object.has_raft() ? size_t(std::max(0, int(print_object.slicing_parameters().raft_layers()) - 1)) : 0;
+    const size_t num_roof_layers  = interface_placer.support_parameters.has_top_contacts ? settings.support_roof_layers : 0;
+    const float  half_width       = 0.5f * float(settings.support_tree_hybrid_min_width);
+
+    // Column tops keyed by the highest layer of the column below its interface layers.
+    std::vector<Polygons> tops_at(num_support_layers);
+    Polygons              shadow;
+    for (size_t layer_idx = 0; layer_idx < num_support_layers && layer_idx + z_distance_delta < overhangs.size(); ++ layer_idx) {
+        shadow = union_(shadow, volumes.getCollision(0, layer_idx, false));
+        Polygons &overhang = overhangs[layer_idx + z_distance_delta];
+        if (layer_idx <= first_layer || overhang.empty())
+            continue;
+        Polygons open = diff(overhang, shadow);
+        if (open.empty())
+            continue;
+        Polygons tops;
+        for (ExPolygon &expoly : union_ex(opening(open, half_width)))
+            if (expoly.area() >= settings.support_tree_hybrid_min_area)
+                append(tops, Algorithms::ExPolygon::to_polygons(std::move(expoly)));
+        if (tops.empty())
+            continue;
+        overhang = diff(overhang, tops);
+        std::vector<Polygons> roofs;
+        for (size_t dtt = 0; dtt < num_roof_layers && layer_idx - dtt > first_layer; ++ dtt)
+            roofs.emplace_back(tops);
+        const size_t base_top = layer_idx - roofs.size();
+        interface_placer.add_roofs(std::move(roofs), layer_idx);
+        append(tops_at[base_top], std::move(tops));
+        throw_on_cancel();
+    }
+
+    // Extend every column down to the bed.
+    Polygons running;
+    for (size_t layer_idx = num_support_layers; layer_idx-- > 0;) {
+        if (! tops_at[layer_idx].empty())
+            running = union_(running, tops_at[layer_idx]);
+        columns[layer_idx] = running;
+    }
+    return columns;
+}
+
 /*!
  * \brief Create the areas that need support.
  *
@@ -3533,6 +3597,10 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
             // value is the area where support may be placed. As this is calculated in CreateLayerPathing it is saved and reused in draw_areas
             std::vector<SupportElements> move_bounds(num_support_layers);
 
+            // Organic Hybrid: columns under big flat overhangs, taken out of the overhangs before the tips are placed.
+            std::vector<Polygons> hybrid_columns = generate_hybrid_columns(print_object, volumes, config, num_support_layers,
+                overhangs, interface_placer, throw_on_cancel);
+
             // ### Place tips of the support tree
             for (size_t mesh_idx : processing.second)
                 generate_initial_areas(*print.get_object(mesh_idx), volumes, config, overhangs, 
@@ -3566,9 +3634,9 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
                 draw_areas(*print.get_object(processing.second.front()), volumes, config, overhangs, move_bounds, 
                     bottom_contacts, top_contacts, intermediate_layers, layer_storage, throw_on_cancel);
             else {
-                assert(print_object.config().get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic);
+                assert(Domain::is_organic_support_style(print_object.config().get<Domain::SupportMaterialStyle>("support_material_style")));
                 organic_draw_branches(
-                    *print.get_object(processing.second.front()), volumes, config, move_bounds, 
+                    *print.get_object(processing.second.front()), volumes, config, move_bounds, hybrid_columns,
                     bottom_contacts, top_contacts, interface_placer, intermediate_layers, layer_storage, 
                     throw_on_cancel);
             }

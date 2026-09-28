@@ -81,9 +81,15 @@ enum class SupportMaterialInterfacePattern {
 };
 enum class SupportMaterialStyle {
     smsGrid, smsSnug, smsTree, smsOrganic,
-    // Tree supports ported from OrcaSlicer.
-    smsTreeSlim, smsTreeHybrid,
+    // Variants of the organic supports: fewer, thinner branches, or regular support columns under big flat overhangs.
+    smsOrganicSlim, smsOrganicHybrid,
 };
+// Organic, Organic Slim and Organic Hybrid share the organic tree generator and toolpaths.
+inline bool is_organic_support_style(SupportMaterialStyle style)
+{
+    return style == SupportMaterialStyle::smsOrganic || style == SupportMaterialStyle::smsOrganicSlim ||
+           style == SupportMaterialStyle::smsOrganicHybrid;
+}
 enum class PerimeterGeneratorType
 {
     Classic, // Classic perimeter generator using Clipper offsets with constant extrusion width.

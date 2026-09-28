@@ -372,8 +372,6 @@ set(SLIC3R_SOURCES
     src/libslic3r/Subdivide.hpp
     src/libslic3r/Support/OrganicSupport.cpp
     src/libslic3r/Support/OrganicSupport.hpp
-    src/libslic3r/Support/OrcaTreeSupport.cpp
-    src/libslic3r/Support/OrcaTreeSupport.hpp
     src/libslic3r/Support/SupportCommon.cpp
     src/libslic3r/Support/SupportCommon.hpp
     src/libslic3r/Support/SupportDebug.cpp

@@ -216,6 +216,20 @@ struct TreeSupportMeshGroupSettings {
     // minimum: min_wall_line_width, minimum warning: min_wall_line_width+0.05, maximum_value: support_tree_branch_diameter, value: support_line_width
     coord_t                         support_tree_tip_diameter               { scaled<coord_t>(0.4) };
 
+/*********************************************************************/
+/* Organic Slim and Organic Hybrid:                                  */
+/*********************************************************************/
+
+    // Organic Slim: branches steer at the maximum branch angle from the start, so neighbours merge sooner,
+    // and stop getting thicker with the distance from their tips at this diameter.
+    bool                            organic_slim                            { false };
+    coord_t                         support_tree_slim_max_diameter          { scaled<coord_t>(4.) };
+    // Organic Hybrid: big flat overhangs over open space get straight columns of regular support.
+    bool                            organic_hybrid                          { false };
+    // Minimum column area (scaled, squared) and width.
+    double                          support_tree_hybrid_min_area            { sqr(scaled<double>(10.)) };
+    coord_t                         support_tree_hybrid_min_width           { scaled<coord_t>(5.) };
+
     // Support Interface Priority
     // How support interface and support will interact when they overlap. Currently only implemented for support roof.
     //enum                           support_interface_priority { support_lines_overwrite_interface_area };
@@ -269,6 +283,11 @@ public:
      * \brief How much a branch radius increases with each layer to guarantee the prescribed tree widening.
      */
     double branch_radius_increase_per_layer;
+    /*!
+     * \brief Organic Slim: the radius stops growing with the distance to top at this value (the foot on the bed is added on top).
+     * Unlimited for the other styles.
+     */
+    coord_t max_radius;
     /*!
      * \brief How much a branch resting on the model may grow in radius by merging with branches that can reach the buildplate.
      */
@@ -379,7 +398,7 @@ public:
 public:
     bool operator==(const TreeSupportSettings& other) const
     {
-        return branch_radius == other.branch_radius && tip_layers == other.tip_layers && branch_radius_increase_per_layer == other.branch_radius_increase_per_layer && layer_start_bp_radius == other.layer_start_bp_radius && bp_radius == other.bp_radius && 
+        return branch_radius == other.branch_radius && tip_layers == other.tip_layers && branch_radius_increase_per_layer == other.branch_radius_increase_per_layer && max_radius == other.max_radius && layer_start_bp_radius == other.layer_start_bp_radius && bp_radius == other.bp_radius && 
                // as a recalculation of the collision areas is required to set a new min_radius.
                bp_radius_increase_per_layer == other.bp_radius_increase_per_layer && min_radius == other.min_radius && xy_min_distance == other.xy_min_distance &&
                xy_distance - xy_min_distance == other.xy_distance - other.xy_min_distance && // if the delta of xy_min_distance and xy_distance is different the collision areas have to be recalculated.
@@ -421,7 +440,8 @@ public:
      */
     [[nodiscard]] inline coord_t getRadius(size_t distance_to_top, const double elephant_foot_increases = 0) const
     {
-        return (distance_to_top <= tip_layers ? min_radius + (branch_radius - min_radius) * distance_to_top / tip_layers : // tip
+        return std::min<double>(max_radius, // Organic Slim caps the growth
+                   distance_to_top <= tip_layers ? min_radius + (branch_radius - min_radius) * distance_to_top / tip_layers : // tip
                        branch_radius + // base
                        (distance_to_top - tip_layers) * branch_radius_increase_per_layer)
                + // gradual increase

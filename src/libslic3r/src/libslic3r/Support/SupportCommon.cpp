@@ -1945,15 +1945,15 @@ void generate_support_toolpaths(
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     sheath  = true;
                     no_sort = true;
-                } else if (const auto style = config.get<Domain::SupportMaterialStyle>("support_material_style");
-                           style == Domain::SupportMaterialStyle::smsOrganic || style == Domain::SupportMaterialStyle::smsTreeSlim ||
-                           style == Domain::SupportMaterialStyle::smsTreeHybrid) {
+                } else if (const auto style = config.get<Domain::SupportMaterialStyle>("support_material_style"); Domain::is_organic_support_style(style)) {
                     tree_supports_generate_paths(base_layer.extrusions, base_layer.polygons_to_extrude(), flow, support_params);
                     // Organic branches print as one or two loops with nothing inside. Where branches merge
                     // into a wide area, a loop printed inside it on a later layer (around a hole or a
                     // notch) would start in mid-air, so fill the inside of wide areas with the regular
                     // sparse support infill. Narrow branches are left as they are.
-                    if (density > 0.f && config.get<bool>("support_tree_fill_inside")) {
+                    // Organic Hybrid always fills them: its columns under big overhangs are wide areas
+                    // that must not be printed hollow.
+                    if (density > 0.f && (config.get<bool>("support_tree_fill_inside") || style == Domain::SupportMaterialStyle::smsOrganicHybrid)) {
                         const float  inset         = float(2.5 * flow.scaled_spacing());
                         const double line_distance = scaled<double>(filler->spacing / density);
                         ExPolygons   inside        = opening_ex(offset_ex(base_layer.polygons_to_extrude(), - inset), float(0.25 * line_distance));

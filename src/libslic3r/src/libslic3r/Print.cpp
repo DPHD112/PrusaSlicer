@@ -779,8 +779,7 @@ DONE:;
     for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++print_object_idx) {
         if (const PrintObject& print_object = *m_objects[print_object_idx];
             print_object.has_support_material()
-            && print_object.config().get<Domain::SupportMaterialStyle>("support_material_style")
-                == Domain::SupportMaterialStyle::smsOrganic
+            && Domain::is_organic_support_style(print_object.config().get<Domain::SupportMaterialStyle>("support_material_style"))
             && print_object.model_object()->has_custom_layering())
         {
             if (const Domain::ZHeightPairs& layers = layer_height_profile(print_object_idx);
@@ -1013,12 +1012,8 @@ DONE:;
                     // Notify the user that printing supports with different nozzle diameters is experimental and requires caution.
                     warnings.emplace_back(Warning{WarningCode::SupportNozzleDiameterDiffer});
                 }
-                // Organic and the OrcaSlicer tree styles print their support on the object layers.
-                if (const auto support_style = object->config().get<Domain::SupportMaterialStyle>("support_material_style");
-                    this->can_have_wipe_tower()
-                    && support_style != Domain::SupportMaterialStyle::smsOrganic
-                    && support_style != Domain::SupportMaterialStyle::smsTreeSlim
-                    && support_style != Domain::SupportMaterialStyle::smsTreeHybrid)
+                if (this->can_have_wipe_tower()
+                    && ! Domain::is_organic_support_style(object->config().get<Domain::SupportMaterialStyle>("support_material_style")))
                 {
                     if (object->config().get<double>("support_material_contact_distance") == 0) {
                         // Soluble interface
@@ -1046,8 +1041,7 @@ DONE:;
                         }
                     }
                 }
-                if (object->config().get<Domain::SupportMaterialStyle>("support_material_style")
-                    == Domain::SupportMaterialStyle::smsOrganic)
+                if (Domain::is_organic_support_style(object->config().get<Domain::SupportMaterialStyle>("support_material_style")))
                 {
                     float extrusion_width = std::min(
                         support_material_flow(object).width(),

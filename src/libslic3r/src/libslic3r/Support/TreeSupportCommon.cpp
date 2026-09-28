@@ -27,7 +27,7 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
 
     // Support must be enabled and set to Tree style.
     assert(config.get<Domain::SupportMode>("support_material") != Domain::SupportMode::None || config.get<int>("support_material_enforce_layers") > 0);
-    assert(config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsTree || config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsOrganic);
+    assert(config.get<Domain::SupportMaterialStyle>("support_material_style") == Domain::SupportMaterialStyle::smsTree || Domain::is_organic_support_style(config.get<Domain::SupportMaterialStyle>("support_material_style")));
 
     // Calculate maximum external perimeter width over all printing regions, taking into account the default layer height.
     double external_perimeter_width = 0.;
@@ -92,6 +92,13 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
     this->support_tree_top_rate       = config.get<Domain::Percentage>("support_tree_top_rate").value; // percent
 //    this->support_tree_tip_diameter = this->support_line_width;
     this->support_tree_tip_diameter = std::clamp(scaled<coord_t>(config.get<double>("support_tree_tip_diameter")), 0, this->support_tree_branch_diameter);
+
+    const auto style = config.get<Domain::SupportMaterialStyle>("support_material_style");
+    this->organic_slim                   = style == Domain::SupportMaterialStyle::smsOrganicSlim;
+    this->support_tree_slim_max_diameter = std::max(scaled<coord_t>(config.get<double>("support_tree_slim_max_diameter")), this->support_tree_branch_diameter);
+    this->organic_hybrid                 = style == Domain::SupportMaterialStyle::smsOrganicHybrid;
+    this->support_tree_hybrid_min_area   = sqr(scaled<double>(1.)) * config.get<double>("support_tree_hybrid_min_area");
+    this->support_tree_hybrid_min_width  = scaled<coord_t>(config.get<double>("support_tree_hybrid_min_width"));
 }
 
 TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mesh_group_settings, const SlicingParameters &slicing_params)
@@ -100,11 +107,14 @@ TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mes
       branch_radius(mesh_group_settings.support_tree_branch_diameter / 2),
       min_radius(mesh_group_settings.support_tree_tip_diameter / 2), // The actual radius is 50 microns larger as the resulting branches will be increased by 50 microns to avoid rounding errors effectively increasing the xydistance
       maximum_move_distance((mesh_group_settings.support_tree_angle < M_PI / 2.) ? (coord_t)(tan(mesh_group_settings.support_tree_angle) * layer_height) : std::numeric_limits<coord_t>::max()),
-      maximum_move_distance_slow((mesh_group_settings.support_tree_angle_slow < M_PI / 2.) ? (coord_t)(tan(mesh_group_settings.support_tree_angle_slow) * layer_height) : std::numeric_limits<coord_t>::max()),
+      // Organic Slim steers at the maximum angle from the start, so neighbouring branches merge sooner.
+      maximum_move_distance_slow(mesh_group_settings.organic_slim ? maximum_move_distance :
+          (mesh_group_settings.support_tree_angle_slow < M_PI / 2.) ? (coord_t)(tan(mesh_group_settings.support_tree_angle_slow) * layer_height) : std::numeric_limits<coord_t>::max()),
       support_bottom_layers(mesh_group_settings.support_bottom_enable ? (mesh_group_settings.support_bottom_height + layer_height / 2) / layer_height : 0),
       // Ensure lines always stack nicely even if layer height is large.
       tip_layers(std::max((branch_radius - min_radius) / (support_line_width / 3), branch_radius / layer_height)),
       branch_radius_increase_per_layer(tan(mesh_group_settings.support_tree_branch_diameter_angle) * layer_height),
+      max_radius(mesh_group_settings.organic_slim ? mesh_group_settings.support_tree_slim_max_diameter / 2 : std::numeric_limits<coord_t>::max()),
       max_to_model_radius_increase(mesh_group_settings.support_tree_max_diameter_increase_by_merges_when_support_to_model / 2),
       min_dtt_to_model(round_up_divide(mesh_group_settings.support_tree_min_height_to_model, layer_height)),
       increase_radius_until_radius(mesh_group_settings.support_tree_branch_diameter / 2),

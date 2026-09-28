@@ -179,8 +179,8 @@ static const t_config_enum_values s_keys_map_SupportMaterialStyle {
     { "snug",           smsSnug },
     { "tree",           smsTree },
     { "organic",        smsOrganic },
-    { "tree_slim",      smsTreeSlim },
-    { "tree_hybrid",    smsTreeHybrid }
+    { "organic_slim",   smsOrganicSlim },
+    { "organic_hybrid", smsOrganicHybrid }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle)
 
@@ -3557,8 +3557,8 @@ void PrintConfigDef::init_fff_params()
         { std::make_pair("grid", L("Grid")) },
         { std::make_pair("snug", L("Snug")) },
         { std::make_pair("organic", L("Organic")) },
-        { std::make_pair("tree_slim", L("Tree Slim")) },
-        { std::make_pair("tree_hybrid", L("Tree Hybrid")) }
+        { std::make_pair("organic_slim", L("Organic Slim")) },
+        { std::make_pair("organic_hybrid", L("Organic Hybrid")) }
     });
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsGrid));

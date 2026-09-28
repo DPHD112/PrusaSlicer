@@ -4305,16 +4305,19 @@ void fdm_config_init_fn(ConfigDefinitions& defs)
     def->gui_type = ConfigItemDef::GUIType::combobox;
     def->tooltip = L("Style and shape of the support towers. Projecting the supports into a regular grid "
                      "will create more stable supports, while snug support towers will save material and reduce "
-                     "object scarring. Tree Slim and Tree Hybrid are the tree supports from OrcaSlicer: "
-                     "Tree Slim grows thin branches from contact points on the overhangs, "
-                     "Tree Hybrid does the same but supports large overhangs with straight columns under them.");
+                     "object scarring.\n"
+                     "Organic Slim builds organic trees whose branches merge sooner into fewer, thinner trunks, "
+                     "to save material: branches lean at the Maximum Branch Angle from the start (the preferred angle "
+                     "isn't used), and trunks stop getting thicker at the Organic Slim maximum branch diameter.\n"
+                     "Organic Hybrid supports big flat overhangs over open space with straight columns of regular "
+                     "support, and everything else with organic branches.");
     def->init_fn = init_with(
         SupportMaterialStyle::smsGrid,
         {{int(SupportMaterialStyle::smsGrid), "grid", L("Grid")},
          {int(SupportMaterialStyle::smsSnug), "snug", L("Snug")},
          {int(SupportMaterialStyle::smsOrganic), "organic", L("Organic")},
-         {int(SupportMaterialStyle::smsTreeSlim), "tree_slim", L("Tree Slim")},
-         {int(SupportMaterialStyle::smsTreeHybrid), "tree_hybrid", L("Tree Hybrid")}}
+         {int(SupportMaterialStyle::smsOrganicSlim), "organic_slim", L("Organic Slim")},
+         {int(SupportMaterialStyle::smsOrganicHybrid), "organic_hybrid", L("Organic Hybrid")}}
     );
 
     def = defs.add("support_material_synchronize_layers", typeid(bool));
@@ -4515,41 +4518,59 @@ void fdm_config_init_fn(ConfigDefinitions& defs)
     // TRN PrintSettings: "Organic supports" > "Fill inside of wide areas"
     def->tooltip = L("Print sparse infill inside wide organic support areas, where branches merge, instead of only their outline. "
                      "Without it, branches starting above such an area can be printed over its empty inside. "
-                     "Uses a little more support material.");
+                     "Uses a little more support material. Organic Hybrid always fills them.");
     def->init_fn = init_with(true);
 
-    def = defs.add("support_tree_orca_branch_diameter", typeid(double));
+    def = defs.add("support_tree_slim_max_diameter", typeid(double));
     def->location = Print;
     def->compatibility_rule = CompatibilityRule::IgnoreOverrides;
     def->overrides_in = Locations{ Tool, Object };
-    def->label = L("Tree Slim/Hybrid branch diameter");
+    def->label = L("Organic Slim: maximum branch diameter");
     def->option_group = ConfigItemDef::OptionGroup::Print_Supports_OrganicSupports;
     def->category = ConfigItemDef::Category::Print_Supports;
     def->order = 10;
     def->gui_type = ConfigItemDef::GUIType::textfield;
-    // TRN PrintSettings: "Organic supports" > "Tree Slim/Hybrid branch diameter"
-    def->tooltip = L("Tree Slim and Tree Hybrid only. Diameter of the branches near their tips. "
-                     "Branches get thicker towards the bed by the branch diameter angle.");
+    // TRN PrintSettings: "Organic supports" > "Organic Slim: maximum branch diameter"
+    def->tooltip = L("Organic Slim only. Branches stop getting thicker further down once they reach this diameter, "
+                     "apart from the wider foot on the bed. Lower saves material, higher makes sturdier trunks on tall parts. "
+                     "Never thinner than the branch diameter.");
     def->units = {L("mm")};
-    def->min = 0.8;
+    def->min = 0.5f;
     def->max = 100.f;
-    def->init_fn = init_with(5.);
+    def->init_fn = init_with(4.);
 
-    def = defs.add("support_tree_orca_branch_distance", typeid(double));
+    def = defs.add("support_tree_hybrid_min_area", typeid(double));
     def->location = Print;
     def->compatibility_rule = CompatibilityRule::IgnoreOverrides;
     def->overrides_in = Locations{ Tool, Object };
-    def->label = L("Tree Slim/Hybrid branch distance");
+    def->label = L("Organic Hybrid: column minimum area");
     def->option_group = ConfigItemDef::OptionGroup::Print_Supports_OrganicSupports;
     def->category = ConfigItemDef::Category::Print_Supports;
     def->order = 11;
     def->gui_type = ConfigItemDef::GUIType::textfield;
-    // TRN PrintSettings: "Organic supports" > "Tree Slim/Hybrid branch distance"
-    def->tooltip = L("Tree Slim and Tree Hybrid only. Distance between the contact points of the branches on the overhangs. "
-                     "A smaller distance supports overhangs better but makes the support harder to remove.");
+    // TRN PrintSettings: "Organic supports" > "Organic Hybrid: column minimum area"
+    def->tooltip = L("Organic Hybrid only. A flat overhang with nothing of the part below it gets a straight column of "
+                     "regular support down to the bed when it is at least this big. Smaller overhangs get organic branches.");
+    def->units = {L("mm²")};
+    def->min = 1.f;
+    def->max = 100000.f;
+    def->init_fn = init_with(100.);
+
+    def = defs.add("support_tree_hybrid_min_width", typeid(double));
+    def->location = Print;
+    def->compatibility_rule = CompatibilityRule::IgnoreOverrides;
+    def->overrides_in = Locations{ Tool, Object };
+    def->label = L("Organic Hybrid: column minimum width");
+    def->option_group = ConfigItemDef::OptionGroup::Print_Supports_OrganicSupports;
+    def->category = ConfigItemDef::Category::Print_Supports;
+    def->order = 12;
+    def->gui_type = ConfigItemDef::GUIType::textfield;
+    // TRN PrintSettings: "Organic supports" > "Organic Hybrid: column minimum width"
+    def->tooltip = L("Organic Hybrid only. Parts of a big flat overhang narrower than this, such as thin strips along "
+                     "the part, are left to organic branches instead of a column.");
     def->units = {L("mm")};
-    def->min = 0.5;
-    def->max = 100.f;
+    def->min = 0.5f;
+    def->max = 1000.f;
     def->init_fn = init_with(5.);
 
     def = defs.add("temperature", typeid(int));
