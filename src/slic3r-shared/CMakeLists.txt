@@ -51,6 +51,13 @@ set(SLIC3R_SHARED_FILES
         src/Slic3r/App/Plater/SimplifyNotification.cpp
         include/Slic3r/App/Plater/SimplifyDialog.hpp
         src/Slic3r/App/Plater/SimplifyDialog.cpp
+        include/Slic3r/App/Plater/MeshFixGizmo.hpp
+        src/Slic3r/App/Plater/MeshFixGizmo.cpp
+        include/Slic3r/App/Plater/MeshFixDialog.hpp
+        src/Slic3r/App/Plater/MeshFixDialog.cpp
+        src/Slic3r/App/Plater/MeshFixColors.hpp
+        src/Slic3r/App/Plater/MeshFixRenderer.hpp
+        src/Slic3r/App/Plater/MeshFixRenderer.cpp
         include/Slic3r/App/Plater/ArrangeDialog.hpp
         src/Slic3r/App/Plater/ArrangeDialog.cpp
         include/Slic3r/App/Plater/ArrangeGizmo.hpp

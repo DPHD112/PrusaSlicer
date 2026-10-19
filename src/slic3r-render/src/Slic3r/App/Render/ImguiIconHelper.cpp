@@ -250,6 +250,7 @@ static const std::unordered_map<Icon, const char*> ICON_FILENAMES = {
     {Icon::ArrowRight, "arrow_right"},
     {Icon::Filter, "filter"},
     {Icon::Robot, "robot"},
+    {Icon::MeshFix, "mesh_fix"},
 };
 
 static const std::unordered_set<Icon> ICON_PNG = {};

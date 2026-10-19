@@ -34,6 +34,7 @@
 #include "Slic3r/App/Plater/ScaleGizmo.hpp"
 #include "Slic3r/App/Plater/PlaceOnFaceGizmo.hpp"
 #include "Slic3r/App/Plater/SimplifyGizmo.hpp"
+#include "Slic3r/App/Plater/MeshFixGizmo.hpp"
 #include "Slic3r/App/Plater/SimplifyNotification.hpp"
 #include "Slic3r/App/Plater/PaintOnSupportsGizmo.hpp"
 #include "Slic3r/App/Plater/PaintOnSupportsDialog.hpp"
@@ -699,6 +700,12 @@ void PlaterRenderModule::init_scene_layout()
         tool_name(Scene::ToolType::Simplify)
     );
 
+    m_toolbar_mesh_fix = m_layout->add_toolbar_item(
+        ToolbarID::ToolRight,
+        tool_icon(Scene::ToolType::MeshFixGizmo),
+        tool_name(Scene::ToolType::MeshFixGizmo)
+    );
+
     m_toolbar_paint_on_supports = m_layout->add_toolbar_item(
         ToolbarID::ToolRight,
         tool_icon(Scene::ToolType::PaintOnSupportsGizmo),
@@ -850,6 +857,7 @@ void PlaterRenderModule::init_dialog_navigation()
         m_multi_material_painting_gizmo->release_ui_window()
     );
     init_gizmo_dialog(Scene::ToolType::Simplify, m_simplify_gizmo->release_ui_window());
+    init_gizmo_dialog(Scene::ToolType::MeshFixGizmo, m_mesh_fix_gizmo->release_ui_window());
     init_gizmo_dialog(Scene::ToolType::TextGizmo, m_text_gizmo->release_ui_window());
     init_gizmo_dialog(Scene::ToolType::Svg, m_svg_gizmo->release_ui_window());
     init_gizmo_dialog(Scene::ToolType::CutGizmo, m_cut_gizmo->release_ui_window());
@@ -1073,6 +1081,12 @@ void PlaterRenderModule::init_gizmos()
     m_project_interactor.scene_interactor().add_listener<ISceneSelectionChangedListener>(
         m_height_range_gizmo
     );
+    m_mesh_fix_gizmo = &m_gizmo_manager->add_tool_gizmo<MeshFixGizmo>(
+        *m_device,
+        m_gizmo_manager->data_factory(),
+        m_project_interactor,
+        *m_scene_presenter
+    );
 
     m_command_binding_manager.set_gizmos_command_registry(&m_gizmo_manager->command_registry());
 }
@@ -1112,6 +1126,8 @@ ToolBarButton* PlaterRenderModule::get_toolbar_button(Scene::ToolType tool_type)
         return m_toolbar_variable_layer_height;
     case Scene::ToolType::HeightRangeGizmo:
         return m_toolbar_height_range;
+    case Scene::ToolType::MeshFixGizmo:
+        return m_toolbar_mesh_fix;
     case Scene::ToolType::None:
         return nullptr;
     default:

@@ -73,6 +73,7 @@ class PlaterCameraGizmo;
 class CutGizmo;
 class VariableLayerHeightGizmo;
 class HeightRangeGizmo;
+class MeshFixGizmo;
 class ArrangeGizmo;
 class PlaterScenePresenter;
 class PlaterRenderLayout;
@@ -244,6 +245,7 @@ private:
     ToolBarButton* m_toolbar_cut                     = nullptr;
     ToolBarButton* m_toolbar_variable_layer_height   = nullptr;
     ToolBarButton* m_toolbar_height_range            = nullptr;
+    ToolBarButton* m_toolbar_mesh_fix                = nullptr;
     ToolBarSwitchButton* m_toolbar_preview_switch    = nullptr;
 
     TranslationGizmo* m_translation_gizmo                       = nullptr;
@@ -263,6 +265,7 @@ private:
     CutGizmo* m_cut_gizmo                                       = nullptr;
     VariableLayerHeightGizmo* m_variable_layer_height_gizmo     = nullptr;
     HeightRangeGizmo* m_height_range_gizmo                      = nullptr;
+    MeshFixGizmo* m_mesh_fix_gizmo                              = nullptr;
 
     std::shared_ptr<ThumbnailStore> m_thumbnail_store;
     std::shared_ptr<ThumbnailStoreUpdater> m_thumbnail_store_updater;

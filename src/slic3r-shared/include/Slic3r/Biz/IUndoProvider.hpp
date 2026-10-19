@@ -111,6 +111,14 @@ enum class UndoSnapshotType
     ReplaceWithStl,
     ReloadFromDisk,
     EditVirtualExtruders,
+    MeshFixDeleteTriangles,
+    MeshFixFlipTriangles,
+    MeshFixSplitPart,
+    MeshFixFillHoles,
+    MeshFixUnifyNormals,
+    MeshFixStitch,
+    MeshFixRemoveNoiseShells,
+    MeshFixAutoFix,
 };
 
 namespace UndoSnapshotSelection {

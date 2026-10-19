@@ -77,6 +77,8 @@ src/slic3r-shared/src/Slic3r/App/Plater/CutGizmo.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/HeightRangeDialog.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/LayerRangeSettingsDialog.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/MeasureDialog.cpp
+src/slic3r-shared/src/Slic3r/App/Plater/MeshFixDialog.cpp
+src/slic3r-shared/src/Slic3r/App/Plater/MeshFixGizmo.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/MultiMaterialPaintingDialog.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/PaintOnFuzzySkinDialog.cpp
 src/slic3r-shared/src/Slic3r/App/Plater/PaintOnSeamsDialog.cpp

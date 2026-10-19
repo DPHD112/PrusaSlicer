@@ -271,6 +271,22 @@ static std::string to_string(Biz::UndoSnapshotType type)
         return _u8L("Reload from disk");
     case Type::EditVirtualExtruders:
         return _u8L("Edit virtual extruders");
+    case Type::MeshFixDeleteTriangles:
+        return _u8L("Mesh fix: Delete triangles");
+    case Type::MeshFixFlipTriangles:
+        return _u8L("Mesh fix: Flip triangles");
+    case Type::MeshFixSplitPart:
+        return _u8L("Mesh fix: Split off part");
+    case Type::MeshFixFillHoles:
+        return _u8L("Mesh fix: Fill holes");
+    case Type::MeshFixUnifyNormals:
+        return _u8L("Mesh fix: Unify normals");
+    case Type::MeshFixStitch:
+        return _u8L("Mesh fix: Stitch");
+    case Type::MeshFixRemoveNoiseShells:
+        return _u8L("Mesh fix: Remove noise shells");
+    case Type::MeshFixAutoFix:
+        return _u8L("Mesh fix: Auto fix");
     case Type::RepairObjectMesh:
         return _u8L("Repair mesh");
     }

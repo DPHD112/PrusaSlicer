@@ -87,6 +87,11 @@ static const std::unordered_map<Scene::ToolType, ToolGizmoUiInfo> tool_gizmos_ui
       Platform::CommandName::HeightRangeGizmo,
       Platform::KeyCode::W,
       Render::Icon::HeightRange}},
+    {Scene::ToolType::MeshFixGizmo,
+     {Biz::L("Mesh Fix"),
+      Platform::CommandName::MeshFixGizmo,
+      Platform::KeyCode::J,
+      Render::Icon::MeshFix}},
 };
 
 std::string tool_name(Scene::ToolType tool)
