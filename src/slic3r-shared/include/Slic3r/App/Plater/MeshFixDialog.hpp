@@ -116,6 +116,10 @@ public:
      * @brief Warn that applying an edit loses the painting of the part.
      */
     void set_painting_warning(bool show);
+    /**
+     * @brief Explain why the last edit was refused, an empty text hides it.
+     */
+    void set_notice(const std::string& text);
 
 private:
     Yoga::Text* add_stat_row(
@@ -164,6 +168,7 @@ private:
 
     MeshFixStats m_stats;
     bool m_painting_warning{false};
+    std::string m_notice;
 };
 
 } // namespace Slic3r::App::Plater

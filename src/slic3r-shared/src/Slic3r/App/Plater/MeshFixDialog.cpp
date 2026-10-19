@@ -438,6 +438,14 @@ void MeshFixDialog::set_painting_warning(bool show)
     update_warning();
 }
 
+void MeshFixDialog::set_notice(const std::string& text)
+{
+    if (text == m_notice)
+        return;
+    m_notice = text;
+    update_warning();
+}
+
 void MeshFixDialog::update_visibility()
 {
     m_angle_row->set_visible(
@@ -449,6 +457,8 @@ void MeshFixDialog::update_visibility()
 void MeshFixDialog::update_warning()
 {
     std::vector<std::string> problems;
+    if (!m_notice.empty())
+        problems.push_back(m_notice);
     if (m_stats.holes > 0)
         problems.emplace_back(Slic3r::format(_u8L("Holes: %1%"), m_stats.holes));
     if (m_stats.open_edges > 0)

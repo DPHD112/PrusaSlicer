@@ -21,6 +21,7 @@
 
 namespace Slic3r::Biz::Algorithms::MeshFix {
 class Session;
+struct MarkParams;
 } // namespace Slic3r::Biz::Algorithms::MeshFix
 
 namespace Slic3r::App::Scene {
@@ -159,7 +160,10 @@ private:
 
     void update_hover(const Scene::GizmoEventContext& ctx);
     void update_preview();
+    Biz::Algorithms::MeshFix::MarkParams mark_params() const;
     void apply_marking_at_hover(bool add);
+    // Continue the brush stroke to the mouse position.
+    void brush_stroke_to(const Domain::Vec2d& screen_position);
     void set_tool(MeshFixTool tool);
     void push_dialog_state();
 
@@ -222,6 +226,10 @@ private:
     std::vector<bool> m_preview;
     bool m_dragging{false};
     bool m_drag_adds{true};
+    // Mouse position of the last brush stroke event.
+    Domain::Vec2d m_last_brush_position{Domain::Vec2d::Zero()};
+    // Last world position the brush marked at.
+    std::optional<Domain::Vec3d> m_last_brush_point;
 };
 
 } // namespace Slic3r::App::Plater

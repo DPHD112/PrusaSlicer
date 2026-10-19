@@ -18,6 +18,10 @@
 #include "Slic3r/Domain/Color.hpp"
 #include "Slic3r/Domain/Types.hpp"
 
+namespace Slic3r {
+class AABBMesh;
+} // namespace Slic3r
+
 namespace Slic3r::App::Plater {
 
 /**
@@ -69,8 +73,18 @@ public:
 
     /**
      * @brief Rebuild the triangles, one category per triangle of the mesh.
+     * @param flipped Triangles facing inwards, drawn reversed to be visible from outside.
      */
-    void update_mesh(const indexed_triangle_set& its, const std::vector<FaceCategory>& categories);
+    void update_mesh(
+        const indexed_triangle_set& its,
+        const std::vector<FaceCategory>& categories,
+        const std::vector<bool>& flipped
+    );
+    /**
+     * @brief Bounding volume of the mesh, used for the camera clipping planes. It has to stay
+     * alive until it is replaced or the nodes are destroyed.
+     */
+    void set_mesh_aabb(const AABBMesh* aabb);
     /**
      * @brief Rebuild the edge lines, pairs of end points in mesh coordinates.
      */
@@ -113,6 +127,7 @@ private:
     Scene::Scene* m_scene{nullptr};
 
     Domain::Transform3d m_world_trafo{Domain::Transform3d::Identity()};
+    const AABBMesh* m_mesh_aabb{nullptr};
 
     Scene::Node* m_main_node{nullptr};
     Scene::Node* m_mesh_node{nullptr};

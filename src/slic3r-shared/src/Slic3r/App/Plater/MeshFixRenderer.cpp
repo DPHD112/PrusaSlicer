@@ -7,9 +7,11 @@
 #include "Slic3r/App/Plater/MeshFixColors.hpp"
 #include "Slic3r/App/Plater/PlaterSceneLayer.hpp"
 #include "Slic3r/App/Render/GeometryBuilder.hpp"
+#include "Slic3r/App/Scene/AabbRaycastNodeComponent.hpp"
 #include "Slic3r/App/Scene/MeshRenderNodeComponent.hpp"
 #include "Slic3r/App/Scene/NodeBuilder.hpp"
 #include "Slic3r/Assert.hpp"
+#include "Slic3r/Domain/Model.hpp"
 
 using Slic3r::Domain::ColorRGBA;
 using Slic3r::Domain::SquareMatrix3f;
@@ -46,9 +48,9 @@ ColorRGBA category_color(MeshFixRenderer::FaceCategory category)
 
 Render::Material mesh_material(Render::Device& device, const Transform3d& world_trafo)
 {
-    // Unlike the paint tools, the parts below the bed are shown too, as they need fixing as well.
+    // Cut at the bed like the paint tools, the picking ignores the parts below the bed as well.
     const Vec4f clipping_plane{0.f, 0.f, 1.f, FLT_MAX};
-    const Vec2f z_range{-FLT_MAX, FLT_MAX};
+    const Vec2f z_range{Domain::SINKING_Z_THRESHOLD, FLT_MAX};
     const SquareMatrix3f world_normal_matrix =
         world_trafo.linear().inverse().transpose().cast<float>();
     return Render::Material{}
@@ -104,6 +106,7 @@ void MeshFixRenderer::destroy(Scene::Scene& scene)
     m_hole_node    = nullptr;
     m_cursors_node = nullptr;
     m_scene        = nullptr;
+    m_mesh_aabb    = nullptr;
     m_mesh_geometry.reset();
     m_edges_geometry.reset();
     m_hole_geometry.reset();
@@ -172,10 +175,13 @@ void MeshFixRenderer::set_node_geometry(
     node->set_enabled(true);
 }
 
-void MeshFixRenderer::
-    update_mesh(const indexed_triangle_set& its, const std::vector<FaceCategory>& categories)
+void MeshFixRenderer::update_mesh(
+    const indexed_triangle_set& its,
+    const std::vector<FaceCategory>& categories,
+    const std::vector<bool>& flipped
+)
 {
-    ASSERT(categories.size() == its.indices.size());
+    ASSERT(categories.size() == its.indices.size() && flipped.size() == its.indices.size());
     std::unique_ptr<Render::Geometry> geometry;
     if (!its.indices.empty()) {
         Render::GeometryBuilder<Render::VertexP3> builder;
@@ -189,8 +195,9 @@ void MeshFixRenderer::
         for (size_t face = 0; face < its.indices.size(); ++face) {
             const stl_triangle_vertex_indices& indices = its.indices[face];
             std::vector<uint32_t>& bucket = indices_per_category[size_t(categories[face])];
-            // Flipped triangles face inwards, they would be culled from outside without reversing them.
-            const bool reverse = categories[face] == FaceCategory::Flipped;
+            // Flipped triangles face inwards, they would be culled from outside without reversing
+            // them, whatever color they are shown in.
+            const bool reverse = flipped[face];
             bucket.push_back(uint32_t(indices[0]));
             bucket.push_back(uint32_t(reverse ? indices[2] : indices[1]));
             bucket.push_back(uint32_t(reverse ? indices[1] : indices[2]));
@@ -216,6 +223,7 @@ void MeshFixRenderer::
         }
         geometry = builder.build(m_device);
     }
+    const bool created = m_mesh_node == nullptr;
     set_node_geometry(
         m_mesh_node,
         m_mesh_geometry,
@@ -224,6 +232,18 @@ void MeshFixRenderer::
         mesh_material(m_device, m_world_trafo),
         Scene::RenderLayerId(PlaterSceneLayer::DocumentObjects)
     );
+    if (created)
+        set_mesh_aabb(m_mesh_aabb);
+}
+
+void MeshFixRenderer::set_mesh_aabb(const AABBMesh* aabb)
+{
+    m_mesh_aabb = aabb;
+    // The hidden volume nodes no longer count, the camera has to see the edited mesh instead.
+    if (m_mesh_node != nullptr)
+        m_mesh_node->set_raycast_component(
+            aabb != nullptr ? new Scene::AabbRaycastNodeComponent(aabb) : nullptr
+        );
 }
 
 std::unique_ptr<Render::Geometry> MeshFixRenderer::create_lines_geometry(

@@ -41,8 +41,11 @@ struct MarkParams
     float plane_angle_deg{1.f};
     // Maximal distance of triangle vertices from a plane, in mesh units.
     float plane_distance{0.01f};
-    // Brush radius in mesh units.
+    // Brush radius, in the units of brush_trafo.
     float brush_radius{1.f};
+    // Transformation of the mesh in which the brush is a sphere, the world transformation of a
+    // part, which may be scaled non-uniformly.
+    Domain::Transform3d brush_trafo{Domain::Transform3d::Identity()};
 };
 
 /**
@@ -117,7 +120,7 @@ public:
     /**
      * @brief Triangles a click with the tool would mark.
      * @param face Clicked triangle.
-     * @param point Clicked point in mesh coordinates, used by the brush.
+     * @param point Clicked point in mesh coordinates, the center of the brush.
      */
     FaceMask
     region(MarkTool tool, int face, const Domain::Vec3f& point, const MarkParams& params) const;
@@ -163,15 +166,24 @@ public:
     size_t delete_marked();
     size_t flip_marked();
     /**
-     * @brief Remove the marked triangles from the mesh. Refuses to remove all triangles of the mesh.
+     * @brief Remove the marked triangles from the mesh. Refuses to remove all triangles of the mesh
+     * and a flat piece, which would make a part without volume.
      * @return The removed triangles, empty if none were removed.
      */
     indexed_triangle_set split_marked();
     size_t fill_hole(int hole_index, HoleFillMode mode);
     size_t fill_all_holes(HoleFillMode mode);
     size_t unify_normals();
+    /**
+     * @brief Stitch the open edges. Refused if it would collapse all triangles, which happens to a
+     * small open mesh with a large tolerance.
+     */
     size_t stitch(float tolerance);
     size_t remove_noise_shells(const NoiseShellParams& params = {});
+    /**
+     * @brief Run all repairs. Refused if they would remove all triangles, for example of a surface
+     * made of pairs of opposite triangles.
+     */
     AutoFixReport auto_fix(const AutoFixParams& params = {});
 
     /**

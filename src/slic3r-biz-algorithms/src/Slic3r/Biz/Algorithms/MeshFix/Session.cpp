@@ -10,6 +10,7 @@
 
 namespace Slic3r::Biz::Algorithms::MeshFix {
 
+using Domain::Transform3d;
 using Domain::Vec3d;
 using Domain::Vec3f;
 
@@ -53,14 +54,21 @@ Vec3d closest_point_on_triangle(const Vec3d& p, const Vec3d& a, const Vec3d& b, 
     return a + ab * (vb * denominator) + ac * (vc * denominator);
 }
 
-bool touches_sphere(const indexed_triangle_set& its, int face, const Vec3d& center, double radius)
+// The sphere is given in the coordinates the mesh is transformed to.
+bool touches_sphere(
+    const indexed_triangle_set& its,
+    int face,
+    const Transform3d& trafo,
+    const Vec3d& center,
+    double radius
+)
 {
     const stl_triangle_vertex_indices& indices = its.indices[face];
     const Vec3d closest                        = closest_point_on_triangle(
         center,
-        its.vertices[indices[0]].cast<double>(),
-        its.vertices[indices[1]].cast<double>(),
-        its.vertices[indices[2]].cast<double>()
+        trafo * its.vertices[indices[0]].cast<double>(),
+        trafo * its.vertices[indices[1]].cast<double>(),
+        trafo * its.vertices[indices[2]].cast<double>()
     );
     return (closest - center).squaredNorm() <= radius * radius;
 }
@@ -71,6 +79,7 @@ FaceMask brush_region(
     const indexed_triangle_set& its,
     const MeshTopology& topology,
     int seed_face,
+    const Transform3d& trafo,
     const Vec3d& center,
     double radius
 )
@@ -86,13 +95,52 @@ FaceMask brush_region(
             if (edge_idx < 0)
                 continue;
             for (const FaceEdge& side : topology.edge_faces(edge_idx))
-                if (!mask[side.face] && touches_sphere(its, side.face, center, radius)) {
+                if (!mask[side.face] && touches_sphere(its, side.face, trafo, center, radius)) {
                     mask[side.face] = true;
                     queue.push_back(side.face);
                 }
         }
     }
     return mask;
+}
+
+// All vertices lie in a plane, such a piece has no volume.
+bool is_flat(const indexed_triangle_set& its)
+{
+    if (its.vertices.size() < 4)
+        return true;
+    // The vertex farthest from the first one and the vertex farthest from the line through both
+    // span the plane.
+    const Vec3d a = its.vertices.front().cast<double>();
+    Vec3d b       = a;
+    for (const Vec3f& vertex : its.vertices)
+        if ((vertex.cast<double>() - a).squaredNorm() > (b - a).squaredNorm())
+            b = vertex.cast<double>();
+    const double size = (b - a).norm();
+    if (size == 0.)
+        return true;
+    const Vec3d axis  = (b - a) / size;
+    Vec3d c           = a;
+    double c_distance = 0.;
+    for (const Vec3f& vertex : its.vertices) {
+        const Vec3d offset    = vertex.cast<double>() - a;
+        const double distance = (offset - axis * axis.dot(offset)).squaredNorm();
+        if (distance > c_distance) {
+            c          = vertex.cast<double>();
+            c_distance = distance;
+        }
+    }
+    // Float coordinates far from the origin are not exactly coplanar.
+    const double tolerance = 1e-5 * (size + a.cwiseAbs().maxCoeff());
+    if (std::sqrt(c_distance) <= tolerance)
+        return true;
+    const Vec3d normal = axis.cross(c - a).normalized();
+    return std::all_of(
+        its.vertices.begin(),
+        its.vertices.end(),
+        [&](const Vec3f& vertex)
+        { return std::abs(normal.dot(vertex.cast<double>() - a)) <= tolerance; }
+    );
 }
 
 // Number of shells containing a marked triangle.
@@ -179,7 +227,8 @@ Session::region(MarkTool tool, int face, const Vec3f& point, const MarkParams& p
             m_mesh,
             *m_topology,
             face,
-            point.cast<double>(),
+            params.brush_trafo,
+            params.brush_trafo * point.cast<double>(),
             double(params.brush_radius)
         );
     }
@@ -327,7 +376,11 @@ indexed_triangle_set Session::split_marked()
 {
     if (m_marked_count == 0 || m_marked_count == m_mesh.indices.size())
         return {};
-    indexed_triangle_set extracted = extract_faces(m_mesh, m_marked);
+    indexed_triangle_set remaining = m_mesh;
+    indexed_triangle_set extracted = extract_faces(remaining, m_marked);
+    if (is_flat(extracted))
+        return {};
+    m_mesh = std::move(remaining);
     update_after_edit(false);
     return extracted;
 }
@@ -360,9 +413,13 @@ size_t Session::unify_normals()
 
 size_t Session::stitch(float tolerance)
 {
-    const size_t merged = stitch_open_edges(m_mesh, tolerance);
-    if (merged > 0)
-        update_after_edit(false);
+    indexed_triangle_set stitched = m_mesh;
+    const size_t merged           = stitch_open_edges(stitched, tolerance);
+    // Never remove the whole mesh.
+    if (merged == 0 || stitched.indices.empty())
+        return 0;
+    m_mesh = std::move(stitched);
+    update_after_edit(false);
     return merged;
 }
 
@@ -380,9 +437,13 @@ size_t Session::remove_noise_shells(const NoiseShellParams& params)
 
 AutoFixReport Session::auto_fix(const AutoFixParams& params)
 {
-    const AutoFixReport report = MeshFix::auto_fix(m_mesh, params);
-    if (report.changed())
-        update_after_edit(false);
+    indexed_triangle_set fixed = m_mesh;
+    const AutoFixReport report = MeshFix::auto_fix(fixed, params);
+    // Never remove the whole mesh.
+    if (!report.changed() || fixed.indices.empty())
+        return {};
+    m_mesh = std::move(fixed);
+    update_after_edit(false);
     return report;
 }
 

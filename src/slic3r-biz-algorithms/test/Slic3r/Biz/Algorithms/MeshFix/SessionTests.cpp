@@ -13,6 +13,7 @@ using namespace Slic3r::Biz::Algorithms::MeshFix::Test;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_cube;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_sphere;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_tetrahedron;
+using Slic3r::Domain::Transform3d;
 using Slic3r::Domain::Vec3d;
 using Slic3r::Domain::Vec3f;
 
@@ -24,6 +25,27 @@ indexed_triangle_set make_open_sphere()
     indexed_triangle_set sphere = its_make_sphere(10., 0.2);
     remove_faces_if(sphere, [&](size_t face) { return centroid(sphere, face).z() > 7.f; });
     return sphere;
+}
+
+// Square grid in the XZ plane centered at the origin.
+indexed_triangle_set make_grid(float size, int cells)
+{
+    indexed_triangle_set grid;
+    const float step = size / float(cells);
+    for (int row = 0; row <= cells; ++row)
+        for (int column = 0; column <= cells; ++column)
+            grid.vertices.emplace_back(
+                -0.5f * size + float(column) * step,
+                0.f,
+                -0.5f * size + float(row) * step
+            );
+    for (int row = 0; row < cells; ++row)
+        for (int column = 0; column < cells; ++column) {
+            const int corner = row * (cells + 1) + column;
+            grid.indices.push_back({corner, corner + cells + 1, corner + 1});
+            grid.indices.push_back({corner + 1, corner + cells + 1, corner + cells + 2});
+        }
+    return grid;
 }
 
 int face_at(const indexed_triangle_set& its, const Vec3f& point)
@@ -168,6 +190,15 @@ TEST_CASE("Session edits of marked triangles", "[algorithms][mesh-fix]")
         CHECK(session.unify_normals() == 12);
         CHECK(session.diagnostics().flipped_faces == 0);
     }
+    SECTION("flat pieces are not split")
+    {
+        session.mark(session.region(MarkTool::Triangle, 0, {}, params), true);
+        CHECK(session.split_marked().indices.empty());
+        session.mark(session.region(MarkTool::Plane, 0, {}, params), true);
+        CHECK(session.split_marked().indices.empty());
+        CHECK(session.mesh().indices.size() == 24);
+        CHECK(session.marked_count() == 2);
+    }
     SECTION("split")
     {
         session.mark(session.region(MarkTool::Shell, 12, {}, params), true);
@@ -230,4 +261,61 @@ TEST_CASE("Session auto fix and reset", "[algorithms][mesh-fix]")
     CHECK(session.marked_count() == 0);
     CHECK(session.diagnostics().holes == 1);
     CHECK(session.diagnostics().noise_shells == 1);
+}
+
+TEST_CASE("Session never removes the whole mesh", "[algorithms][mesh-fix]")
+{
+    SECTION("stitching a narrow strip with a large tolerance")
+    {
+        // Strip 0.5 wide with 0.8 long triangles, all its vertices would be merged.
+        indexed_triangle_set strip;
+        for (int i = 0; i < 20; ++i) {
+            strip.vertices.emplace_back(0.8f * float(i), 0.f, 0.f);
+            strip.vertices.emplace_back(0.8f * float(i), 0.5f, 0.f);
+        }
+        for (int i = 0; i + 1 < 20; ++i) {
+            strip.indices.push_back({2 * i, 2 * i + 2, 2 * i + 1});
+            strip.indices.push_back({2 * i + 1, 2 * i + 2, 2 * i + 3});
+        }
+        Session session(std::move(strip));
+        CHECK(session.stitch(1.f) == 0);
+        CHECK(session.mesh().indices.size() == 38);
+        CHECK(session.diagnostics().open_edges == 40);
+    }
+    SECTION("auto fix of a surface made of pairs of opposite triangles")
+    {
+        indexed_triangle_set surface;
+        surface.vertices = {{0.f, 0.f, 0.f}, {10.f, 0.f, 0.f}, {0.f, 10.f, 0.f}};
+        surface.indices  = {{0, 1, 2}, {0, 2, 1}};
+        Session session(std::move(surface));
+        CHECK(!session.auto_fix().changed());
+        CHECK(session.mesh().indices.size() == 2);
+    }
+}
+
+TEST_CASE("Session brush is a sphere in the transformed mesh", "[algorithms][mesh-fix]")
+{
+    // Cells of 0.1 x 0.1, stretched four times along X by the transformation.
+    Session session(make_grid(10.f, 100));
+    MarkParams brush;
+    brush.brush_radius = 2.f;
+    brush.brush_trafo  = Transform3d::Identity();
+    brush.brush_trafo.scale(Vec3d{4., 1., 1.});
+
+    const Vec3f center = Vec3f::Zero();
+    const FaceMask region =
+        session.region(MarkTool::Brush, face_at(session.mesh(), center), center, brush);
+    float max_x = 0.f;
+    float max_z = 0.f;
+    for (size_t face = 0; face < region.size(); ++face)
+        if (region[face]) {
+            const Vec3f point = centroid(session.mesh(), face);
+            max_x             = std::max(max_x, 4.f * std::abs(point.x()));
+            max_z             = std::max(max_z, std::abs(point.z()));
+        }
+    // A circle of radius 2 in the stretched grid, the size of a cell from it at most.
+    CHECK(max_x > 1.6f);
+    CHECK(max_x < 2.4f);
+    CHECK(max_z > 1.9f);
+    CHECK(max_z < 2.1f);
 }

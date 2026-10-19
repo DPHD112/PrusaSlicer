@@ -34,6 +34,7 @@
 using namespace magic_enum::bitwise_operators;
 
 using Slic3r::Domain::Transform3d;
+using Slic3r::Domain::Vec2d;
 using Slic3r::Domain::Vec3d;
 using Slic3r::Domain::Vec3f;
 
@@ -510,7 +511,10 @@ Scene::GizmoActivationState MeshFixGizmo::on_mouse(Scene::GizmoEventContext& ctx
     if (mouse_event.type() == MouseEvent::Type::Move && !m_dragging)
         return GizmoActivationState::Inactive;
 
-    if (left_button && mouse_event.type() == MouseEvent::Type::ButtonDown && !ctrl_down) {
+    // The second press of a quick double click comes as a double click event.
+    const bool button_down = mouse_event.type() == MouseEvent::Type::ButtonDown
+        || mouse_event.type() == MouseEvent::Type::DoubleClick;
+    if (left_button && button_down && !ctrl_down) {
         if (m_tool == MeshFixTool::FillHole) {
             if (m_hover.hole < 0)
                 return GizmoActivationState::Inactive;
@@ -520,21 +524,23 @@ Scene::GizmoActivationState MeshFixGizmo::on_mouse(Scene::GizmoEventContext& ctx
         }
         if (m_hover.face < 0)
             return GizmoActivationState::Inactive;
-        m_dragging  = true;
-        m_drag_adds = !shift_down;
+        m_dragging            = true;
+        m_drag_adds           = !shift_down;
+        m_last_brush_position = Vec2d{ctx.screen_mouse_x(), ctx.screen_mouse_y()};
+        m_last_brush_point    = m_world_trafo * m_hover.point.cast<double>();
         apply_marking_at_hover(m_drag_adds);
         return GizmoActivationState::Active;
     }
 
     if (mouse_event.type() == MouseEvent::Type::Move && m_dragging) {
-        if (m_tool == MeshFixTool::MarkBrush && m_hover.face >= 0)
-            apply_marking_at_hover(m_drag_adds);
+        if (m_tool == MeshFixTool::MarkBrush)
+            brush_stroke_to(Vec2d{ctx.screen_mouse_x(), ctx.screen_mouse_y()});
         return GizmoActivationState::Active;
     }
 
     if (left_button && mouse_event.type() == MouseEvent::Type::ButtonUp && m_dragging) {
         m_dragging = false;
-        return GizmoActivationState::Active;
+        return GizmoActivationState::Done;
     }
 
     return GizmoActivationState::Inactive;
@@ -582,17 +588,14 @@ void MeshFixGizmo::update_preview()
     const std::optional<MeshFix::MarkTool> mark_tool = to_mark_tool(m_tool);
     std::vector<bool> preview;
     if (mark_tool.has_value() && m_tool != MeshFixTool::MarkBrush && m_hover.face >= 0) {
-        // The region of a shell, surface or plane does not change while the cursor stays inside.
-        const bool keep = m_tool != MeshFixTool::MarkTriangle
+        // The shell or surface does not change while the cursor stays inside. The plane does, it is
+        // measured from the clicked triangle.
+        const bool keep = (m_tool == MeshFixTool::MarkShell || m_tool == MeshFixTool::MarkSurface)
             && size_t(m_hover.face) < m_preview.size()
             && m_preview[m_hover.face];
         if (keep)
             return;
-        MeshFix::MarkParams params;
-        params.surface_angle_deg = float(m_surface_angle_deg);
-        params.plane_angle_deg   = float(m_plane_angle_deg);
-        params.plane_distance    = float(PlaneDistance / m_world_scale);
-        preview = m_session->region(*mark_tool, m_hover.face, m_hover.point, params);
+        preview = m_session->region(*mark_tool, m_hover.face, m_hover.point, mark_params());
     }
     if (preview.empty() && m_preview.empty())
         return;
@@ -600,17 +603,68 @@ void MeshFixGizmo::update_preview()
     refresh_marking();
 }
 
+MeshFix::MarkParams MeshFixGizmo::mark_params() const
+{
+    MeshFix::MarkParams params;
+    params.surface_angle_deg = float(m_surface_angle_deg);
+    params.plane_angle_deg   = float(m_plane_angle_deg);
+    params.plane_distance    = float(PlaneDistance / m_world_scale);
+    // The brush is a sphere in the world like its cursor, also on a non-uniformly scaled part.
+    params.brush_radius = float(m_brush_radius);
+    params.brush_trafo  = m_world_trafo;
+    return params;
+}
+
 void MeshFixGizmo::apply_marking_at_hover(bool add)
 {
     const std::optional<MeshFix::MarkTool> mark_tool = to_mark_tool(m_tool);
     if (!mark_tool.has_value() || m_hover.face < 0)
         return;
-    MeshFix::MarkParams params;
-    params.surface_angle_deg = float(m_surface_angle_deg);
-    params.plane_angle_deg   = float(m_plane_angle_deg);
-    params.plane_distance    = float(PlaneDistance / m_world_scale);
-    params.brush_radius      = float(m_brush_radius / m_world_scale);
-    if (m_session->mark(m_session->region(*mark_tool, m_hover.face, m_hover.point, params), add)) {
+    const MeshFix::FaceMask region =
+        m_session->region(*mark_tool, m_hover.face, m_hover.point, mark_params());
+    if (m_session->mark(region, add)) {
+        refresh_marking();
+        refresh_dialog();
+    }
+}
+
+void MeshFixGizmo::brush_stroke_to(const Vec2d& screen_position)
+{
+    // Mark along the path from the previous mouse position, a fast stroke would leave gaps.
+    const Vec2d from                 = m_last_brush_position;
+    m_last_brush_position            = screen_position;
+    const MeshFix::MarkParams params = mark_params();
+    const size_t steps = std::max<size_t>(1, size_t(std::ceil((screen_position - from).norm())));
+    bool changed       = false;
+    for (size_t step = 1; step <= steps; ++step) {
+        const Vec2d position = from + (screen_position - from) * (double(step) / double(steps));
+        const Scene::Ray ray = scene().camera().ray_at(position.x(), position.y());
+        const std::optional<Biz::Utils::MeshRaycaster::UnprojectResult> hit =
+            Biz::Utils::MeshRaycaster::unproject_on_mesh(
+                m_pick_mesh->aabb_mesh(),
+                ray,
+                m_world_trafo,
+                std::nullopt,
+                false
+            );
+        if (!hit.has_value())
+            continue;
+        // Spheres half the radius apart cover the path, marking at every pixel would be slow.
+        const Vec3d world_point = m_world_trafo * hit->position;
+        if (step < steps
+            && m_last_brush_point.has_value()
+            && (world_point - *m_last_brush_point).norm() < 0.5 * m_brush_radius)
+            continue;
+        m_last_brush_point             = world_point;
+        const MeshFix::FaceMask region = m_session->region(
+            MeshFix::MarkTool::Brush,
+            int(hit->facet_idx),
+            hit->position.cast<float>(),
+            params
+        );
+        changed = m_session->mark(region, m_drag_adds) || changed;
+    }
+    if (changed) {
         refresh_marking();
         refresh_dialog();
     }
@@ -644,9 +698,14 @@ void MeshFixGizmo::push_dialog_state()
 
 void MeshFixGizmo::refresh_mesh()
 {
-    // The triangles were renumbered, the picking and the hover are stale.
-    m_pick_mesh = std::make_unique<Scene::TriangleMesh>(indexed_triangle_set(m_session->mesh()));
-    m_hover     = {};
+    // The triangles were renumbered, the picking and the hover are stale. The previous picking
+    // mesh is released after the mesh node stops referencing it.
+    const std::unique_ptr<Scene::TriangleMesh> previous_pick_mesh = std::exchange(
+        m_pick_mesh,
+        std::make_unique<Scene::TriangleMesh>(indexed_triangle_set(m_session->mesh()))
+    );
+    m_renderer->set_mesh_aabb(&m_pick_mesh->aabb_mesh());
+    m_hover = {};
     m_preview.clear();
     refresh_marking();
     refresh_mesh_edges();
@@ -678,7 +737,7 @@ void MeshFixGizmo::refresh_marking()
         else if (m_show_problems && noise[face])
             categories[face] = FaceCategory::Noise;
     }
-    m_renderer->update_mesh(its, categories);
+    m_renderer->update_mesh(its, categories, flipped);
 }
 
 void MeshFixGizmo::refresh_mesh_edges()
@@ -750,6 +809,8 @@ void MeshFixGizmo::refresh_dialog()
     if (m_session->intersections_detected())
         stats.intersecting = diagnostics.intersecting_faces;
     m_dialog->set_stats(stats);
+    // The notice explains the last refused edit, the user moved on.
+    m_dialog->set_notice({});
 }
 
 void MeshFixGizmo::commit(Biz::UndoSnapshotType snapshot_type, indexed_triangle_set split_part)
@@ -824,6 +885,11 @@ void MeshFixGizmo::commit(Biz::UndoSnapshotType snapshot_type, indexed_triangle_
     m_committing = false;
     m_project_interactor.undo_provider().take_snapshot(snapshot_type);
 
+    // The gizmo manager deactivates the tool when the edit leaves it no part to fix.
+    if (!m_active) {
+        m_target.reset();
+        return;
+    }
     if (updated.empty()) {
         if (m_gizmo_controller != nullptr)
             m_gizmo_controller->deactivate_current_tool();
@@ -839,8 +905,16 @@ void MeshFixGizmo::commit(Biz::UndoSnapshotType snapshot_type, indexed_triangle_
 
 void MeshFixGizmo::delete_marked()
 {
-    if (m_session && m_session->delete_marked() > 0)
+    if (!m_session || m_session->marked_count() == 0)
+        return;
+    if (m_session->delete_marked() > 0)
         commit(Biz::UndoSnapshotType::MeshFixDeleteTriangles);
+    else
+        m_dialog->set_notice(
+            Biz::_u8L(
+                "All triangles are marked. To remove the whole part, delete it in the object list."
+            )
+        );
 }
 
 void MeshFixGizmo::flip_marked()
@@ -853,9 +927,17 @@ void MeshFixGizmo::split_marked()
 {
     if (!m_session)
         return;
+    if (m_session->marked_count() == 0)
+        return;
     indexed_triangle_set part = m_session->split_marked();
     if (!part.indices.empty())
         commit(Biz::UndoSnapshotType::MeshFixSplitPart, std::move(part));
+    else
+        m_dialog->set_notice(
+            Biz::_u8L(
+                "Only a piece with volume can be split off, the marked triangles are flat or make up the whole part."
+            )
+        );
 }
 
 void MeshFixGizmo::fill_hovered_hole()
