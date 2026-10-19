@@ -124,6 +124,17 @@ public:
      */
     FaceMask
     region(MarkTool tool, int face, const Domain::Vec3f& point, const MarkParams& params) const;
+    /**
+     * @brief Add the triangles a brush click would mark to the region. Lets a brush stroke collect
+     * many spheres without a mask of the whole mesh for each of them.
+     * @param region Mask with a flag for each triangle of the mesh.
+     */
+    void add_brush_region(
+        FaceMask& region,
+        int face,
+        const Domain::Vec3f& point,
+        const MarkParams& params
+    ) const;
 
     /**
      * @brief Add the region to the marking, or remove it from the marking.
@@ -159,15 +170,16 @@ public:
     ) const;
 
     // Edits. All of them return the number of changed elements, zero if the mesh did not change.
+    // The edits which remove triangles are refused if less than two triangles would remain.
 
     /**
-     * @brief Delete the marked triangles. Refuses to delete all triangles of the mesh.
+     * @brief Delete the marked triangles.
      */
     size_t delete_marked();
     size_t flip_marked();
     /**
-     * @brief Remove the marked triangles from the mesh. Refuses to remove all triangles of the mesh
-     * and a flat piece, which would make a part without volume.
+     * @brief Remove the marked triangles from the mesh. Refuses a flat piece, which would make a
+     * part without volume.
      * @return The removed triangles, empty if none were removed.
      */
     indexed_triangle_set split_marked();
@@ -175,14 +187,14 @@ public:
     size_t fill_all_holes(HoleFillMode mode);
     size_t unify_normals();
     /**
-     * @brief Stitch the open edges. Refused if it would collapse all triangles, which happens to a
-     * small open mesh with a large tolerance.
+     * @brief Stitch the open edges. A large tolerance may collapse a small open mesh, which is
+     * refused.
      */
     size_t stitch(float tolerance);
     size_t remove_noise_shells(const NoiseShellParams& params = {});
     /**
-     * @brief Run all repairs. Refused if they would remove all triangles, for example of a surface
-     * made of pairs of opposite triangles.
+     * @brief Run all repairs. They may remove all triangles, for example of a surface made of pairs
+     * of opposite triangles, which is refused.
      */
     AutoFixReport auto_fix(const AutoFixParams& params = {});
 

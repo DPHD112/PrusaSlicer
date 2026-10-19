@@ -508,6 +508,13 @@ Scene::GizmoActivationState MeshFixGizmo::on_mouse(Scene::GizmoEventContext& ctx
 
     update_hover(ctx);
 
+    // Mouse moves outside of the view are not reported, a brush stroke continues from where the
+    // mouse comes back.
+    if (m_dragging && mouse_event.type() == MouseEvent::Type::Enter) {
+        m_last_brush_position = Vec2d{ctx.screen_mouse_x(), ctx.screen_mouse_y()};
+        m_last_brush_point.reset();
+    }
+
     if (mouse_event.type() == MouseEvent::Type::Move && !m_dragging)
         return GizmoActivationState::Inactive;
 
@@ -635,7 +642,8 @@ void MeshFixGizmo::brush_stroke_to(const Vec2d& screen_position)
     m_last_brush_position            = screen_position;
     const MeshFix::MarkParams params = mark_params();
     const size_t steps = std::max<size_t>(1, size_t(std::ceil((screen_position - from).norm())));
-    bool changed       = false;
+    // Triangles under the brush along the path, marked together.
+    MeshFix::FaceMask stroke;
     for (size_t step = 1; step <= steps; ++step) {
         const Vec2d position = from + (screen_position - from) * (double(step) / double(steps));
         const Scene::Ray ray = scene().camera().ray_at(position.x(), position.y());
@@ -655,16 +663,13 @@ void MeshFixGizmo::brush_stroke_to(const Vec2d& screen_position)
             && m_last_brush_point.has_value()
             && (world_point - *m_last_brush_point).norm() < 0.5 * m_brush_radius)
             continue;
-        m_last_brush_point             = world_point;
-        const MeshFix::FaceMask region = m_session->region(
-            MeshFix::MarkTool::Brush,
-            int(hit->facet_idx),
-            hit->position.cast<float>(),
-            params
-        );
-        changed = m_session->mark(region, m_drag_adds) || changed;
+        m_last_brush_point = world_point;
+        if (stroke.empty())
+            stroke.assign(m_session->mesh().indices.size(), false);
+        m_session
+            ->add_brush_region(stroke, int(hit->facet_idx), hit->position.cast<float>(), params);
     }
-    if (changed) {
+    if (!stroke.empty() && m_session->mark(stroke, m_drag_adds)) {
         refresh_marking();
         refresh_dialog();
     }
@@ -912,7 +917,7 @@ void MeshFixGizmo::delete_marked()
     else
         m_dialog->set_notice(
             Biz::_u8L(
-                "All triangles are marked. To remove the whole part, delete it in the object list."
+                "At least two triangles of the part have to remain. To remove the whole part, delete it in the object list."
             )
         );
 }
@@ -925,9 +930,7 @@ void MeshFixGizmo::flip_marked()
 
 void MeshFixGizmo::split_marked()
 {
-    if (!m_session)
-        return;
-    if (m_session->marked_count() == 0)
+    if (!m_session || m_session->marked_count() == 0)
         return;
     indexed_triangle_set part = m_session->split_marked();
     if (!part.indices.empty())
@@ -935,7 +938,7 @@ void MeshFixGizmo::split_marked()
     else
         m_dialog->set_notice(
             Biz::_u8L(
-                "Only a piece with volume can be split off, the marked triangles are flat or make up the whole part."
+                "Only a piece with volume can be split off, and at least two triangles of the part have to remain."
             )
         );
 }

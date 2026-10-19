@@ -124,6 +124,14 @@ TEST_CASE("Session marking", "[algorithms][mesh-fix]")
         CHECK(count_marked(region) >= 3);
         for (size_t face = 12; face < 24; ++face)
             CHECK(!region[face]);
+
+        // A stroke collects the spheres in one region.
+        FaceMask stroke(session.mesh().indices.size(), false);
+        session.add_brush_region(stroke, 0, Vec3f{10.f, 10.f, 0.f}, brush);
+        CHECK(stroke == region);
+        const FaceMask other = session.region(MarkTool::Brush, 12, Vec3f{20.f, 0.f, 0.f}, brush);
+        session.add_brush_region(stroke, 12, Vec3f{20.f, 0.f, 0.f}, brush);
+        CHECK(count_marked(stroke) == count_marked(region) + count_marked(other));
     }
 
     SECTION("add, remove, invert, all")
@@ -189,6 +197,16 @@ TEST_CASE("Session edits of marked triangles", "[algorithms][mesh-fix]")
         CHECK(session.diagnostics().flipped_faces == 12);
         CHECK(session.unify_normals() == 12);
         CHECK(session.diagnostics().flipped_faces == 0);
+    }
+    SECTION("at least two triangles remain")
+    {
+        session.mark_all();
+        session.mark(session.region(MarkTool::Triangle, 0, {}, params), false);
+        CHECK(session.delete_marked() == 0);
+        CHECK(session.split_marked().indices.empty());
+        session.mark(session.region(MarkTool::Triangle, 1, {}, params), false);
+        CHECK(session.delete_marked() == 22);
+        CHECK(session.mesh().indices.size() == 2);
     }
     SECTION("flat pieces are not split")
     {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 #include "Slic3r/Biz/Algorithms/MeshFix/Edit.hpp"
@@ -15,6 +16,10 @@ using Domain::Vec3d;
 using Domain::Vec3f;
 
 namespace {
+
+// A part of a single triangle gets no convex hull when its project is loaded, the edits keep at
+// least two triangles.
+constexpr size_t MinFaces = 2;
 
 size_t count_marked(const FaceMask& mask)
 {
@@ -73,9 +78,10 @@ bool touches_sphere(
     return (closest - center).squaredNorm() <= radius * radius;
 }
 
-// Triangles touching the sphere and connected to the seed through triangles touching the sphere,
-// so that the brush does not reach through thin walls.
-FaceMask brush_region(
+// Add the triangles touching the sphere and connected to the seed through triangles touching the
+// sphere to the mask, so that the brush does not reach through thin walls.
+void collect_brush_region(
+    FaceMask& mask,
     const indexed_triangle_set& its,
     const MeshTopology& topology,
     int seed_face,
@@ -84,7 +90,8 @@ FaceMask brush_region(
     double radius
 )
 {
-    FaceMask mask(topology.faces_count(), false);
+    // The mask may already hold other spheres of a brush stroke, which do not limit this one.
+    std::unordered_set<int> visited{seed_face};
     std::vector<int> queue{seed_face};
     mask[seed_face] = true;
     while (!queue.empty()) {
@@ -95,13 +102,15 @@ FaceMask brush_region(
             if (edge_idx < 0)
                 continue;
             for (const FaceEdge& side : topology.edge_faces(edge_idx))
-                if (!mask[side.face] && touches_sphere(its, side.face, trafo, center, radius)) {
+                if (!visited.contains(side.face)
+                    && touches_sphere(its, side.face, trafo, center, radius))
+                {
+                    visited.insert(side.face);
                     mask[side.face] = true;
                     queue.push_back(side.face);
                 }
         }
     }
-    return mask;
 }
 
 // All vertices lie in a plane, such a piece has no volume.
@@ -222,17 +231,29 @@ Session::region(MarkTool tool, int face, const Vec3f& point, const MarkParams& p
         return mark_surface(m_mesh, *m_topology, face, params.surface_angle_deg);
     case MarkTool::Plane:
         return mark_plane(m_mesh, *m_topology, face, params.plane_angle_deg, params.plane_distance);
-    case MarkTool::Brush:
-        return brush_region(
-            m_mesh,
-            *m_topology,
-            face,
-            params.brush_trafo,
-            params.brush_trafo * point.cast<double>(),
-            double(params.brush_radius)
-        );
+    case MarkTool::Brush: {
+        FaceMask mask(m_mesh.indices.size(), false);
+        add_brush_region(mask, face, point, params);
+        return mask;
+    }
     }
     return FaceMask(m_mesh.indices.size(), false);
+}
+
+void Session::
+    add_brush_region(FaceMask& region, int face, const Vec3f& point, const MarkParams& params) const
+{
+    if (face < 0 || size_t(face) >= m_mesh.indices.size() || region.size() != m_mesh.indices.size())
+        return;
+    collect_brush_region(
+        region,
+        m_mesh,
+        *m_topology,
+        face,
+        params.brush_trafo,
+        params.brush_trafo * point.cast<double>(),
+        double(params.brush_radius)
+    );
 }
 
 bool Session::mark(const FaceMask& region, bool add)
@@ -357,7 +378,7 @@ int Session::hole_at_ray(
 
 size_t Session::delete_marked()
 {
-    if (m_marked_count == 0 || m_marked_count == m_mesh.indices.size())
+    if (m_marked_count == 0 || m_mesh.indices.size() - m_marked_count < MinFaces)
         return 0;
     const size_t removed = delete_faces(m_mesh, m_marked);
     update_after_edit(false);
@@ -374,7 +395,7 @@ size_t Session::flip_marked()
 
 indexed_triangle_set Session::split_marked()
 {
-    if (m_marked_count == 0 || m_marked_count == m_mesh.indices.size())
+    if (m_marked_count == 0 || m_mesh.indices.size() - m_marked_count < MinFaces)
         return {};
     indexed_triangle_set remaining = m_mesh;
     indexed_triangle_set extracted = extract_faces(remaining, m_marked);
@@ -415,8 +436,7 @@ size_t Session::stitch(float tolerance)
 {
     indexed_triangle_set stitched = m_mesh;
     const size_t merged           = stitch_open_edges(stitched, tolerance);
-    // Never remove the whole mesh.
-    if (merged == 0 || stitched.indices.empty())
+    if (merged == 0 || stitched.indices.size() < MinFaces)
         return 0;
     m_mesh = std::move(stitched);
     update_after_edit(false);
@@ -425,9 +445,9 @@ size_t Session::stitch(float tolerance)
 
 size_t Session::remove_noise_shells(const NoiseShellParams& params)
 {
-    const FaceMask noise = MeshFix::mark_noise_shells(m_mesh, *m_topology, params);
-    // Never remove the whole mesh.
-    if (count_marked(noise) == m_mesh.indices.size())
+    const FaceMask noise     = MeshFix::mark_noise_shells(m_mesh, *m_topology, params);
+    const size_t noise_count = count_marked(noise);
+    if (noise_count == 0 || m_mesh.indices.size() - noise_count < MinFaces)
         return 0;
     const size_t removed = delete_faces(m_mesh, noise);
     if (removed > 0)
@@ -439,8 +459,7 @@ AutoFixReport Session::auto_fix(const AutoFixParams& params)
 {
     indexed_triangle_set fixed = m_mesh;
     const AutoFixReport report = MeshFix::auto_fix(fixed, params);
-    // Never remove the whole mesh.
-    if (!report.changed() || fixed.indices.empty())
+    if (!report.changed() || fixed.indices.size() < MinFaces)
         return {};
     m_mesh = std::move(fixed);
     update_after_edit(false);
