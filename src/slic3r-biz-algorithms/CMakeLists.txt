@@ -101,6 +101,18 @@ add_library(slic3r-biz-algorithms STATIC
     src/Slic3r/Biz/Algorithms/VirtualExtruder.cpp
     include/Slic3r/Biz/Algorithms/VirtualExtruderPresets.hpp
     src/Slic3r/Biz/Algorithms/VirtualExtruderPresets.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/MeshTopology.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/MeshTopology.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/Marking.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/Marking.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/HoleFill.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/HoleFill.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/Edit.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/Edit.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/Repair.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/Repair.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/Diagnostics.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/Diagnostics.cpp
 )
 target_include_directories(slic3r-biz-algorithms PUBLIC include)
 target_include_directories(slic3r-biz-algorithms PRIVATE src)
@@ -141,7 +153,9 @@ if(SLIC3R_BUILD_TESTS)
         test/Slic3r/Biz/Algorithms/BoundingBoxTests.cpp
         test/Slic3r/Biz/Algorithms/BedContainmentTests.cpp
         test/Slic3r/Biz/Algorithms/OptimizersTests.cpp
-
+        test/Slic3r/Biz/Algorithms/MeshFix/MarkingTests.cpp
+        test/Slic3r/Biz/Algorithms/MeshFix/HoleFillTests.cpp
+        test/Slic3r/Biz/Algorithms/MeshFix/RepairTests.cpp
     )
     target_include_directories(slic3r-biz-algorithms-tests PRIVATE test)
 
