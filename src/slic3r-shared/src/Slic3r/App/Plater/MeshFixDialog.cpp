@@ -516,12 +516,12 @@ void MeshFixDialog::set_stats(const MeshFixStats& stats)
     m_flipped_value->set_text(std::to_string(stats.flipped));
     m_shells_value->set_text(std::to_string(stats.shells));
     m_noise_shells_value->set_text(std::to_string(stats.noise_shells));
-    // TRN Mesh fix: The intersections were not checked yet.
     m_intersecting_value->set_text(
+        // TRN Mesh fix: The intersections were not checked yet.
         stats.intersecting.has_value() ? std::to_string(*stats.intersecting) : _u8L("not checked")
     );
-    // TRN Mesh fix: The wall thickness was not analyzed yet.
     m_thin_value->set_text(
+        // TRN Mesh fix: The wall thickness was not analyzed yet.
         stats.thin_faces.has_value() ? std::to_string(*stats.thin_faces) : _u8L("not analyzed")
     );
     m_thinnest_value->set_text(

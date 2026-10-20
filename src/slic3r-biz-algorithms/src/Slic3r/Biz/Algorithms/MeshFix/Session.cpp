@@ -481,15 +481,18 @@ void Session::mark_thin_faces(float limit)
 void Session::analyze_thickness(const Transform3d& trafo)
 {
     // Measured on the transformed mesh, a non-uniform scale changes the thickness differently in
-    // different directions.
-    indexed_triangle_set transformed = m_mesh;
+    // different directions. Without the translation, which does not change the thickness, so that
+    // the float coordinates stay as precise as they are.
+    const Domain::Transform3d::LinearMatrixType linear = trafo.linear();
+    indexed_triangle_set transformed                   = m_mesh;
     for (Vec3f& vertex : transformed.vertices)
-        vertex = (trafo * vertex.cast<double>()).cast<float>();
+        vertex = (linear * vertex.cast<double>()).cast<float>();
     // A mirroring turns the triangles inside out.
-    if (trafo.linear().determinant() < 0.)
+    if (linear.determinant() < 0.)
         for (stl_triangle_vertex_indices& indices : transformed.indices)
             std::swap(indices[1], indices[2]);
-    m_thickness          = measure_thickness(transformed, m_flipped);
+    // The transformation keeps the topology.
+    m_thickness          = measure_thickness(transformed, *m_topology, m_flipped);
     m_thickness_analyzed = true;
 }
 

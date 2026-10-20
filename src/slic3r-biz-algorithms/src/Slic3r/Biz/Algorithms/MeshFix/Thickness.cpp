@@ -7,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
+#include <utility>
 
 #include "Slic3r/Biz/Algorithms/AABBTreeIndirect.hpp"
 #include "Slic3r/Domain/Types.hpp"
@@ -14,10 +16,28 @@
 namespace Slic3r::Biz::Algorithms::MeshFix {
 
 using Domain::Vec3d;
+using Domain::Vec3f;
 
 namespace {
 
-constexpr float Unknown = std::numeric_limits<float>::infinity();
+constexpr double Infinity = std::numeric_limits<double>::infinity();
+
+using Tree = AABBTreeIndirect::Tree<3, float>;
+using Box  = Tree::BoundingBox;
+
+struct Hit
+{
+    double distance;
+    int face;
+};
+
+// Memory reused between the rays of a thread.
+struct Scratch
+{
+    std::vector<Hit> hits;
+    // Other shells whose bounding box contains the point.
+    std::vector<int> shells;
+};
 
 // Normal of the triangle facing out of the solid, not normalized.
 Vec3d outward_normal(const indexed_triangle_set& its, const FaceMask& flipped, int face)
@@ -30,64 +50,322 @@ Vec3d outward_normal(const indexed_triangle_set& its, const FaceMask& flipped, i
     return !flipped.empty() && flipped[face] ? Vec3d(-normal) : normal;
 }
 
-// Distance along the ray to where it leaves the solid, infinity if it does not.
-// The hits are reused between the calls to save allocations.
-template <typename Tree>
-double distance_to_exit(
-    const indexed_triangle_set& its,
-    const FaceMask& flipped,
-    const Tree& tree,
-    int face,
-    const Vec3d& origin,
-    const Vec3d& direction,
-    double tolerance,
-    std::vector<igl::Hit>& hits
-)
+class Measurement
 {
-    AABBTreeIndirect::
-        intersect_ray_all_hits(its.vertices, its.indices, tree, origin, direction, hits);
-    // Inside of the solid behind the triangle, each shell entered on the way has to be left.
-    int depth = 1;
-    for (size_t i = 0; i < hits.size();) {
-        // Crossings at the same distance are one crossing: a ray through an edge or a vertex hits
-        // all triangles around it, a ray from one shell into a touching one leaves and enters.
-        const float distance = hits[i].t;
-        bool enters          = false;
-        bool leaves          = false;
-        for (; i < hits.size() && hits[i].t - distance <= tolerance; ++i) {
-            if (hits[i].id == face || hits[i].t <= tolerance)
-                continue;
-            const double facing = outward_normal(its, flipped, hits[i].id).dot(direction);
-            enters              = enters || facing < 0.;
-            leaves              = leaves || facing > 0.;
+public:
+    Measurement(
+        const indexed_triangle_set& its,
+        const MeshTopology& topology,
+        const FaceMask& flipped
+    ) :
+        m_its(its),
+        m_flipped(flipped),
+        m_tree(
+            AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices)
+        )
+    {
+        const Box& box        = m_tree.nodes().front().bbox;
+        const double diagonal = (box.max() - box.min()).cast<double>().norm();
+        const double magnitude =
+            std::max(box.min().cwiseAbs().maxCoeff(), box.max().cwiseAbs().maxCoeff());
+        // Crossings closer than the tolerance are merged. It is far below the size of a printable
+        // detail, and above the rounding of the float coordinates.
+        m_tolerance =
+            std::max(1e-6 * diagonal, 16. * std::numeric_limits<float>::epsilon() * magnitude);
+        // Triangles are hit unless the ray is parallel to them, also tiny ones of a tiny part.
+        m_epsilon = 1e-12 * diagonal * diagonal;
+        // Most walls are much thinner than the part, the ray is followed further only if needed.
+        m_window = diagonal / 64.;
+
+        const Shells shells = find_shells(topology);
+        m_face_shell        = shells.face_shell;
+        if (shells.count() > 1) {
+            // Bounding boxes of the shells tell which points may lie inside of other shells.
+            std::vector<Box> boxes(shells.count(), Box());
+            for (size_t face = 0; face < its.indices.size(); ++face)
+                for (int vertex : its.indices[face])
+                    boxes[m_face_shell[face]].extend(its.vertices[vertex]);
+
+            struct Input
+            {
+                size_t idx() const
+                {
+                    return index;
+                }
+
+                const Box& bbox() const
+                {
+                    return box;
+                }
+
+                const Tree::VectorType& centroid() const
+                {
+                    return center;
+                }
+
+                size_t index;
+                Box box;
+                Tree::VectorType center;
+            };
+
+            std::vector<Input> input;
+            input.reserve(boxes.size());
+            const Vec3f margin = Vec3f::Constant(float(8. * m_tolerance));
+            for (size_t shell = 0; shell < boxes.size(); ++shell) {
+                boxes[shell] = Box(boxes[shell].min() - margin, boxes[shell].max() + margin);
+                input.push_back({shell, boxes[shell], boxes[shell].center()});
+            }
+            m_shell_tree.build(std::move(input));
+            m_shell_boxes = std::move(boxes);
         }
-        depth += int(enters) - int(leaves);
-        if (depth <= 0)
-            return double(distance);
     }
-    return std::numeric_limits<double>::infinity();
-}
+
+    /**
+     * Distance from the point of the triangle against its normal to where the ray leaves the
+     * solid. Infinity if it does not leave the solid within the cap.
+     */
+    double thickness(
+        int face,
+        const Vec3d& point,
+        const Vec3d& direction,
+        double cap,
+        Scratch& scratch
+    ) const
+    {
+        const Vec3d inverse    = direction.cwiseInverse();
+        std::vector<Hit>& hits = scratch.hits;
+
+        // Inside of the shell of the triangle, each shell entered on the way has to be left.
+        int depth = 1;
+        if (other_shells_around(point, m_face_shell[face], scratch.shells)) {
+            const std::optional<int> entered = enter_other_shells(point, direction, scratch);
+            if (!entered.has_value())
+                // Material of another shell just outside of the triangle makes the point an inner
+                // one, it is not on a wall.
+                return Infinity;
+            depth += *entered;
+        }
+
+        // The nearest crossings decide, the ray is followed further only if needed.
+        double from = 0.;
+        double to   = std::min(m_window, cap);
+        for (;;) {
+            hits.clear();
+            collect_hits(0, point, direction, inverse, from, to + 2. * m_tolerance, hits);
+            std::sort(
+                hits.begin(),
+                hits.end(),
+                [](const Hit& l, const Hit& r) { return l.distance < r.distance; }
+            );
+            for (size_t i = 0; i < hits.size() && hits[i].distance <= to;) {
+                const double distance = hits[i].distance;
+                depth -= crossing_exits(face, direction, hits, i);
+                // The crossings up to here are done, the next ones are further.
+                from = hits[i - 1].distance;
+                if (depth <= 0)
+                    return distance;
+            }
+            if (to >= cap)
+                return Infinity;
+            to = cap;
+        }
+    }
+
+private:
+    // Other shells whose bounding box contains the point, those may contain the point.
+    bool other_shells_around(const Vec3d& point, int own_shell, std::vector<int>& shells) const
+    {
+        shells.clear();
+        AABBTreeIndirect::traverse(
+            m_shell_tree,
+            AABBTreeIndirect::intersecting(Box(point.cast<float>(), point.cast<float>())),
+            [&shells, own_shell](const Tree::Node& node)
+            {
+                if (int(node.idx) != own_shell)
+                    shells.push_back(int(node.idx));
+                return true;
+            }
+        );
+        return !shells.empty();
+    }
+
+    /**
+     * Number of the other shells around the point which continue behind the triangle, the triangle
+     * lies on their surface. Empty if the point lies inside of another shell.
+     *
+     * Follows the ray from just outside of the triangle through the bounding boxes of the shells.
+     * The ray leaves a shell containing its start once more than it enters it, it enters a shell
+     * continuing behind the triangle right at the triangle.
+     */
+    std::optional<int>
+    enter_other_shells(const Vec3d& point, const Vec3d& direction, Scratch& scratch) const
+    {
+        const double offset    = 4. * m_tolerance;
+        const Vec3d outside    = point - offset * direction;
+        const Vec3d inverse    = direction.cwiseInverse();
+        std::vector<Hit>& hits = scratch.hits;
+        double end             = 0.;
+        for (int shell : scratch.shells) {
+            const Box& box = m_shell_boxes[shell];
+            double exit    = Infinity;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double near = (double(box.min()[axis]) - outside[axis]) * inverse[axis];
+                const double far  = (double(box.max()[axis]) - outside[axis]) * inverse[axis];
+                exit              = std::min(exit, std::max(near, far));
+            }
+            end = std::max(end, exit);
+        }
+        hits.clear();
+        collect_hits(0, outside, direction, inverse, 0., end, hits);
+        std::sort(
+            hits.begin(),
+            hits.end(),
+            [](const Hit& l, const Hit& r) { return l.distance < r.distance; }
+        );
+
+        int entered = 0;
+        for (int shell : scratch.shells) {
+            int exits      = 0;
+            bool enters_at = false;
+            for (size_t i = 0; i < hits.size();) {
+                // A ray through an edge or a vertex hits all triangles around it.
+                const size_t begin = i;
+                bool enters        = false;
+                bool leaves        = false;
+                for (; i < hits.size() && hits[i].distance - hits[begin].distance <= m_tolerance;
+                     ++i)
+                {
+                    if (m_face_shell[hits[i].face] != shell)
+                        continue;
+                    const int kind = crossing(hits[i].face, direction);
+                    enters         = enters || kind < 0;
+                    leaves         = leaves || kind > 0;
+                }
+                exits += int(leaves) - int(enters);
+                enters_at = enters_at || (enters && hits[begin].distance <= 2. * offset);
+            }
+            if (exits > 0)
+                return std::nullopt;
+            if (enters_at)
+                ++entered;
+        }
+        return entered;
+    }
+
+    // Hits of the ray with the triangles at distances in (from, to].
+    void collect_hits(
+        size_t node_idx,
+        const Vec3d& origin,
+        const Vec3d& direction,
+        const Vec3d& inverse,
+        double from,
+        double to,
+        std::vector<Hit>& hits
+    ) const
+    {
+        const Tree::Node& node = m_tree.node(node_idx);
+        if (!AABBTreeIndirect::detail::ray_box_intersect_invdir(
+                origin,
+                inverse,
+                node.bbox.cast<double>(),
+                std::max(0., from - m_tolerance),
+                to + m_tolerance
+            ))
+            return;
+        if (node.is_leaf()) {
+            const stl_triangle_vertex_indices& indices = m_its.indices[node.idx];
+            double distance                            = 0.;
+            double u                                   = 0.;
+            double v                                   = 0.;
+            if (AABBTreeIndirect::detail::intersect_triangle(
+                    origin,
+                    direction,
+                    m_its.vertices[indices[0]].cast<double>().eval(),
+                    m_its.vertices[indices[1]].cast<double>().eval(),
+                    m_its.vertices[indices[2]].cast<double>().eval(),
+                    distance,
+                    u,
+                    v,
+                    m_epsilon
+                )
+                && distance > from
+                && distance <= to)
+                hits.push_back({distance, int(node.idx)});
+            return;
+        }
+        collect_hits(Tree::left_child_idx(node_idx), origin, direction, inverse, from, to, hits);
+        collect_hits(Tree::right_child_idx(node_idx), origin, direction, inverse, from, to, hits);
+    }
+
+    // +1 when the ray leaves the shell of the triangle, -1 when it enters it, 0 when it grazes it.
+    int crossing(int face, const Vec3d& direction) const
+    {
+        const double facing = outward_normal(m_its, m_flipped, face).dot(direction);
+        return facing > 0. ? 1 : facing < 0. ? -1 : 0;
+    }
+
+    /**
+     * Number of shells the ray leaves minus the number it enters at the hits from i on, which are
+     * at the same distance: a ray through an edge or a vertex hits all triangles around it, they
+     * count once per shell, a ray from a shell into a touching one leaves one and enters the
+     * other. Moves i past these hits.
+     */
+    int
+    crossing_exits(int face, const Vec3d& direction, const std::vector<Hit>& hits, size_t& i) const
+    {
+        const size_t begin = i;
+        while (i < hits.size() && hits[i].distance - hits[begin].distance <= m_tolerance)
+            ++i;
+        // The own triangle and triangles touching the start of the ray are not crossed.
+        const auto counts = [&](size_t hit)
+        { return hits[hit].face != face && hits[hit].distance > m_tolerance; };
+        int exits = 0;
+        for (size_t hit = begin; hit < i; ++hit) {
+            if (!counts(hit))
+                continue;
+            const int kind  = crossing(hits[hit].face, direction);
+            const int shell = m_face_shell[hits[hit].face];
+            bool repeated   = kind == 0;
+            for (size_t other = begin; other < hit && !repeated; ++other)
+                repeated = counts(other)
+                    && m_face_shell[hits[other].face] == shell
+                    && crossing(hits[other].face, direction) == kind;
+            if (!repeated)
+                exits += kind;
+        }
+        return exits;
+    }
+
+    const indexed_triangle_set& m_its;
+    const FaceMask& m_flipped;
+    Tree m_tree;
+    std::vector<int> m_face_shell;
+    // Bounding boxes of the shells, empty for a single shell.
+    std::vector<Box> m_shell_boxes;
+    Tree m_shell_tree;
+    double m_tolerance{0.};
+    double m_epsilon{0.};
+    double m_window{0.};
+};
 
 } // namespace
 
-std::vector<float> measure_thickness(const indexed_triangle_set& its, const FaceMask& flipped)
+std::vector<float> measure_thickness(
+    const indexed_triangle_set& its,
+    const MeshTopology& topology,
+    const FaceMask& flipped
+)
 {
-    std::vector<float> thickness(its.indices.size(), Unknown);
+    std::vector<float> thickness(its.indices.size(), std::numeric_limits<float>::infinity());
     if (its.indices.empty())
         return thickness;
 
-    const auto tree =
-        AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices);
-    // Crossings closer than the tolerance are merged, it is far below the float precision of
-    // the coordinates of a printable part.
-    const Eigen::AlignedBox<float, 3>& box = tree.nodes().front().bbox;
-    const double tolerance                 = 1e-6 * (box.max() - box.min()).cast<double>().norm();
-
+    const Measurement measurement(its, topology, flipped);
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, its.indices.size()),
         [&](const tbb::blocked_range<size_t>& range)
         {
-            std::vector<igl::Hit> hits;
+            Scratch scratch;
             for (size_t face = range.begin(); face < range.end(); ++face) {
                 const Vec3d normal = outward_normal(its, flipped, int(face));
                 if (normal.squaredNorm() == 0.)
@@ -95,35 +373,22 @@ std::vector<float> measure_thickness(const indexed_triangle_set& its, const Face
                 const Vec3d direction = -normal.normalized();
 
                 const stl_triangle_vertex_indices& indices = its.indices[face];
-                const std::array<Vec3d, 3> corners{
-                    its.vertices[indices[0]].cast<double>(),
-                    its.vertices[indices[1]].cast<double>(),
-                    its.vertices[indices[2]].cast<double>()
-                };
-                const Vec3d centroid = (corners[0] + corners[1] + corners[2]) / 3.;
-                double shortest      = distance_to_exit(
-                    its,
-                    flipped,
-                    tree,
-                    int(face),
+                const Vec3d a        = its.vertices[indices[0]].cast<double>();
+                const Vec3d b        = its.vertices[indices[1]].cast<double>();
+                const Vec3d c        = its.vertices[indices[2]].cast<double>();
+                const Vec3d centroid = (a + b + c) / 3.;
+                const std::array<Vec3d, 4> points{
                     centroid,
-                    direction,
-                    tolerance,
-                    hits
-                );
-                for (const Vec3d& corner : corners)
+                    0.5 * (centroid + a),
+                    0.5 * (centroid + b),
+                    0.5 * (centroid + c)
+                };
+                // The rays after the first only need to look closer than the shortest so far.
+                double shortest = Infinity;
+                for (const Vec3d& point : points)
                     shortest = std::min(
                         shortest,
-                        distance_to_exit(
-                            its,
-                            flipped,
-                            tree,
-                            int(face),
-                            0.5 * (centroid + corner),
-                            direction,
-                            tolerance,
-                            hits
-                        )
+                        measurement.thickness(int(face), point, direction, shortest, scratch)
                     );
                 thickness[face] = float(shortest);
             }

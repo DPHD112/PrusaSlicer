@@ -367,3 +367,21 @@ TEST_CASE("Session wall thickness", "[algorithms][mesh-fix]")
     CHECK(!session.thickness_analyzed());
     CHECK(session.thickness().empty());
 }
+
+TEST_CASE("Session wall thickness is the same anywhere on the bed", "[algorithms][mesh-fix]")
+{
+    // A small bar of two touching cubes, rotated and moved far from the origin.
+    indexed_triangle_set bar = its_make_cube(1., 1., 1.);
+    append(bar, its_make_cube(1., 1., 1.), Vec3f{1.f, 0.f, 0.f});
+    Session session(std::move(bar));
+    for (int i = 0; i < 100; ++i) {
+        Transform3d trafo = Transform3d::Identity();
+        trafo.translate(Vec3d{180.1, 179.4, 10.8});
+        trafo.rotate(
+            Eigen::AngleAxisd(0.37 * i, Vec3d(1., 0.3 * (i % 7), 0.1 * (i % 5)).normalized())
+        );
+        session.analyze_thickness(trafo);
+        const std::vector<float>& thickness = session.thickness();
+        CHECK(*std::min_element(thickness.begin(), thickness.end()) > 0.999f);
+    }
+}

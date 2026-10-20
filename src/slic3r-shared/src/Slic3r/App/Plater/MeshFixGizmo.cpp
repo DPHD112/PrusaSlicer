@@ -765,18 +765,18 @@ void MeshFixGizmo::refresh_marking()
     const std::vector<bool>& crossing   = m_session->intersecting();
     const std::vector<float>& thickness = m_session->thickness();
     const bool show_thickness           = m_show_thickness && m_session->thickness_analyzed();
+    // The same limit as for marking the thin walls.
+    const float min_wall = float(m_min_wall);
     std::vector<FaceCategory> categories(its.indices.size(), FaceCategory::Normal);
     for (size_t face = 0; face < categories.size(); ++face) {
         if (marked[face])
             categories[face] = FaceCategory::Marked;
         else if (face < m_preview.size() && m_preview[face])
             categories[face] = FaceCategory::Preview;
-        else if (show_thickness && thickness[face] < m_min_wall) {
+        else if (show_thickness && thickness[face] < min_wall) {
             // Shades from the thinnest walls to the walls close to the minimum.
             const size_t shade = std::min(
-                size_t(
-                    double(thickness[face]) / m_min_wall * double(MeshFixColors::ThinWallShades)
-                ),
+                size_t(thickness[face] / min_wall * float(MeshFixColors::ThinWallShades)),
                 MeshFixColors::ThinWallShades - 1
             );
             categories[face] = FaceCategory(size_t(FaceCategory::ThinWall) + shade);
@@ -860,11 +860,13 @@ void MeshFixGizmo::refresh_dialog()
         stats.intersecting = diagnostics.intersecting_faces;
     if (m_session->thickness_analyzed()) {
         const std::vector<float>& thickness = m_session->thickness();
-        stats.thin_faces                    = size_t(
+        // The same limit as for marking the thin walls.
+        const float min_wall = float(m_min_wall);
+        stats.thin_faces     = size_t(
             std::count_if(
                 thickness.begin(),
                 thickness.end(),
-                [this](float value) { return value < m_min_wall; }
+                [min_wall](float value) { return value < min_wall; }
             )
         );
         if (!thickness.empty())
