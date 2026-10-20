@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "Slic3r/App/Plater/MeshFixColors.hpp"
 #include "Slic3r/App/Plater/PaintOnGizmoHelper.hpp"
 #include "Slic3r/App/Render/Device.hpp"
 #include "Slic3r/App/Render/Geometry.hpp"
@@ -48,7 +49,9 @@ public:
         Flipped,
         Intersecting,
         Noise,
-        Count
+        // Walls thinner than the minimum, MeshFixColors::ThinWallShades shades from the thinnest.
+        ThinWall,
+        Count = ThinWall + MeshFixColors::ThinWallShades
     };
 
     MeshFixRenderer(Render::Device& device, Scene::GeometryDataFactory& data_factory);

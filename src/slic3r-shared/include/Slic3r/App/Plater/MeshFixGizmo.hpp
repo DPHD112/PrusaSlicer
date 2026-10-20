@@ -174,6 +174,7 @@ private:
     void refresh_hole();
     void refresh_cursor();
     void refresh_dialog();
+    void refresh_cursor_thickness();
 
     /**
      * @brief Replace the volume mesh by the edited one and take an undo snapshot.
@@ -191,6 +192,8 @@ private:
     void remove_noise_shells();
     void auto_fix();
     void check_intersections();
+    void analyze_thickness();
+    void mark_thin_walls();
 
     Biz::ProjectInteractor& m_project_interactor;
     PlaterScenePresenter& m_scene_presenter;
@@ -220,6 +223,9 @@ private:
     MeshFixFillMode m_fill_mode{MeshFixFillMode::Smooth};
     double m_stitch_tolerance{0.01};
     bool m_show_problems{true};
+    // Walls thinner than this are highlighted, in mm.
+    double m_min_wall{1.};
+    bool m_show_thickness{true};
 
     Hover m_hover;
     // Triangles a click would mark, shown under the cursor.

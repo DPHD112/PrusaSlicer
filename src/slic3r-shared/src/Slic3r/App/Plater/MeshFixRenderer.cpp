@@ -28,6 +28,8 @@ namespace {
 ColorRGBA category_color(MeshFixRenderer::FaceCategory category)
 {
     using FaceCategory = MeshFixRenderer::FaceCategory;
+    if (category >= FaceCategory::ThinWall && category < FaceCategory::Count)
+        return MeshFixColors::thin_wall(size_t(category) - size_t(FaceCategory::ThinWall));
     switch (category) {
     case FaceCategory::Marked:
         return MeshFixColors::marked();
@@ -40,6 +42,7 @@ ColorRGBA category_color(MeshFixRenderer::FaceCategory category)
     case FaceCategory::Noise:
         return MeshFixColors::noise();
     case FaceCategory::Normal:
+    case FaceCategory::ThinWall:
     case FaceCategory::Count:
         break;
     }

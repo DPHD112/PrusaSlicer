@@ -1,5 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+
 #include "Slic3r/Domain/Color.hpp"
 
 /**
@@ -55,6 +59,19 @@ inline Domain::ColorRGBA hole()
 inline Domain::ColorRGBA brush()
 {
     return {0.15f, 0.70f, 0.35f, 0.25f};
+}
+
+// Number of shades of the walls thinner than the minimum.
+inline constexpr size_t ThinWallShades = 4;
+
+// Walls thinner than the minimum, from the thinnest (0) to close to the minimum.
+inline Domain::ColorRGBA thin_wall(size_t shade)
+{
+    static constexpr std::array<std::array<float, 3>, ThinWallShades> shades{
+        {{0.65f, 0.00f, 0.10f}, {0.88f, 0.15f, 0.18f}, {0.97f, 0.42f, 0.40f}, {1.00f, 0.68f, 0.66f}}
+    };
+    const std::array<float, 3>& color = shades[std::min(shade, ThinWallShades - 1)];
+    return {color[0], color[1], color[2], 1.f};
 }
 
 } // namespace Slic3r::App::Plater::MeshFixColors

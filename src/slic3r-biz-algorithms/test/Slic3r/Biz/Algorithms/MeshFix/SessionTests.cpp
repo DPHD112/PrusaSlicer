@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include "Slic3r/Biz/Algorithms/MeshFix/Session.hpp"
 #include "Slic3r/Biz/Algorithms/TriangleMesh.hpp"
 
+using namespace Catch;
 using namespace Slic3r::Biz::Algorithms::MeshFix;
 using namespace Slic3r::Biz::Algorithms::MeshFix::Test;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_cube;
@@ -336,4 +338,32 @@ TEST_CASE("Session brush is a sphere in the transformed mesh", "[algorithms][mes
     CHECK(max_x < 2.4f);
     CHECK(max_z > 1.9f);
     CHECK(max_z < 2.1f);
+}
+
+TEST_CASE("Session wall thickness", "[algorithms][mesh-fix]")
+{
+    Session session(its_make_cube(10., 10., 1.));
+    CHECK(!session.thickness_analyzed());
+    session.mark_thin_faces(100.f);
+    CHECK(session.marked_count() == 0);
+
+    // Measured in the world, here mirrored and stretched along Z.
+    Transform3d trafo = Transform3d::Identity();
+    trafo.scale(Vec3d{-1., 1., 2.});
+    session.analyze_thickness(trafo);
+    REQUIRE(session.thickness_analyzed());
+    REQUIRE(session.thickness().size() == 12);
+    CHECK(*std::min_element(session.thickness().begin(), session.thickness().end()) == Approx(2.f));
+    CHECK(
+        *std::max_element(session.thickness().begin(), session.thickness().end()) == Approx(10.f)
+    );
+
+    // The top and the bottom.
+    session.mark_thin_faces(2.5f);
+    CHECK(session.marked_count() == 4);
+
+    // An edit makes the thickness stale.
+    CHECK(session.flip_marked() == 4);
+    CHECK(!session.thickness_analyzed());
+    CHECK(session.thickness().empty());
 }

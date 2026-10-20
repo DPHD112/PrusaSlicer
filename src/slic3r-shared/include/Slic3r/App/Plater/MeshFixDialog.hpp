@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +58,10 @@ struct MeshFixStats
     size_t noise_shells{0};
     // Empty until the intersections were checked.
     std::optional<size_t> intersecting;
+    // Triangles thinner than the minimum wall, empty until the wall thickness was analyzed.
+    std::optional<size_t> thin_faces;
+    // Thinnest wall in mm, infinity if none was measured.
+    float thinnest_wall{std::numeric_limits<float>::infinity()};
 };
 
 /**
@@ -75,6 +80,8 @@ public:
         std::function<void(MeshFixFillMode)> fill_mode_changed{nullptr};
         std::function<void(double)> stitch_tolerance_changed{nullptr};
         std::function<void(bool)> show_problems_changed{nullptr};
+        std::function<void(double)> min_wall_changed{nullptr};
+        std::function<void(bool)> show_thickness_changed{nullptr};
 
         std::function<void()> clear_marks{nullptr};
         std::function<void()> invert_marks{nullptr};
@@ -94,6 +101,8 @@ public:
         std::function<void()> stitch{nullptr};
         std::function<void()> remove_noise_shells{nullptr};
         std::function<void()> check_intersections{nullptr};
+        std::function<void()> analyze_thickness{nullptr};
+        std::function<void()> mark_thin_walls{nullptr};
         std::function<void()> auto_fix{nullptr};
     };
 
@@ -109,7 +118,13 @@ public:
     void set_fill_mode(MeshFixFillMode mode);
     void set_stitch_tolerance(double tolerance);
     void set_show_problems(bool show);
+    void set_min_wall(double thickness);
+    void set_show_thickness(bool show);
     void set_stats(const MeshFixStats& stats);
+    /**
+     * @brief Wall thickness under the cursor in mm, empty if there is none to show.
+     */
+    void set_cursor_thickness(std::optional<float> thickness);
     /**@}*/
 
     /**
@@ -152,6 +167,9 @@ private:
     Yoga::ComboBox* m_fill_mode{nullptr};
     Yoga::InputTextWithSpin* m_stitch_tolerance{nullptr};
     Yoga::ToggleButton* m_show_problems{nullptr};
+    Yoga::InputTextWithSpin* m_min_wall{nullptr};
+    Yoga::ToggleButton* m_show_thickness{nullptr};
+    double m_min_wall_value{1.};
 
     Yoga::Text* m_triangles_value{nullptr};
     Yoga::Text* m_marked_value{nullptr};
@@ -162,6 +180,9 @@ private:
     Yoga::Text* m_shells_value{nullptr};
     Yoga::Text* m_noise_shells_value{nullptr};
     Yoga::Text* m_intersecting_value{nullptr};
+    Yoga::Text* m_thin_value{nullptr};
+    Yoga::Text* m_thinnest_value{nullptr};
+    Yoga::Text* m_cursor_thickness_value{nullptr};
 
     // Enabled only when some triangles are marked.
     std::vector<Yoga::LayoutButton*> m_marked_buttons;

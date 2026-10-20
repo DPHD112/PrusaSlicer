@@ -16,6 +16,8 @@
 #include <fmt/format.h>
 #include <imgui/imgui.h>
 
+#include <cmath>
+
 using namespace Slic3r::App::Yoga;
 using namespace Slic3r::Biz;
 
@@ -26,6 +28,12 @@ namespace {
 ImColor to_imcolor(const Domain::ColorRGBA& color)
 {
     return ImColor(color.r(), color.g(), color.b(), color.a());
+}
+
+std::string format_thickness(float thickness)
+{
+    // TRN Mesh fix: Wall thickness which could not be measured, behind a hole of the mesh.
+    return std::isinf(thickness) ? _u8L("unknown") : fmt::format("{:.2f} mm", thickness);
 }
 
 } // namespace
@@ -195,6 +203,72 @@ MeshFixDialog::MeshFixDialog() : GizmoWindow()
     {
         if (!m_ignore_callbacks && m_callbacks.show_problems_changed)
             m_callbacks.show_problems_changed(checked);
+    };
+
+    add_separator(content());
+
+    // Wall thickness
+    content()
+        ->emplace_back<Text>(_u8L("Wall thickness"))
+        ->set_font_type(Render::ImguiFontType::Bold);
+    add_row_with_spin_double(
+        _u8L("Minimum wall"),
+        content(),
+        &m_min_wall,
+        "mm",
+        std::string{},
+        0.01,
+        50.,
+        0.05,
+        0.5
+    );
+    m_min_wall->callbacks().text_edited = [this]()
+    {
+        const auto* validator = dynamic_cast<const DoubleValidator*>(m_min_wall->validator());
+        if (validator == nullptr)
+            return;
+        m_min_wall_value = validator->value();
+        if (!m_ignore_callbacks && m_callbacks.min_wall_changed)
+            m_callbacks.min_wall_changed(m_min_wall_value);
+    };
+    m_thin_value = add_stat_row(content(), _u8L("Thinner triangles"), MeshFixColors::thin_wall(0));
+    m_thinnest_value         = add_stat_row(content(), _u8L("Thinnest wall"), std::nullopt);
+    m_cursor_thickness_value = add_stat_row(content(), _u8L("Under the cursor"), std::nullopt);
+
+    // Legend of the shades of the thin walls.
+    Item* legend = content()->emplace_back<Item>();
+    legend->set_gap(gap_size());
+    legend->set_flex_shrink(0.f);
+    legend->set_align_items(YGAlignCenter);
+    legend->emplace_back<Text>(_u8L("Thinnest"));
+    for (size_t shade = 0; shade < MeshFixColors::ThinWallShades; ++shade) {
+        Circle* marker = legend->emplace_back<Circle>();
+        marker->set_height(12_fpx);
+        marker->set_flex_shrink(0.f);
+        marker->set_fill(to_imcolor(MeshFixColors::thin_wall(shade)));
+    }
+    legend->emplace_back<Text>(_u8L("Close to the minimum"));
+
+    Item* thickness_buttons = add_buttons_row(content());
+    add_action_button(
+        thickness_buttons,
+        _u8L("Analyze"),
+        _u8L("Measure the wall thickness, which may take a while for large meshes"),
+        &Callbacks::analyze_thickness
+    );
+    add_action_button(
+        thickness_buttons,
+        _u8L("Mark thin walls"),
+        _u8L("Mark the triangles thinner than the minimum wall"),
+        &Callbacks::mark_thin_walls
+    );
+
+    add_row_with_toggle_button(_u8L("Show wall thickness"), content(), &m_show_thickness);
+    m_show_thickness->set_checked(true);
+    m_show_thickness->callbacks().checked_changed = [this](bool checked)
+    {
+        if (!m_ignore_callbacks && m_callbacks.show_thickness_changed)
+            m_callbacks.show_thickness_changed(checked);
     };
 
     add_separator(content());
@@ -412,6 +486,25 @@ void MeshFixDialog::set_show_problems(bool show)
     m_ignore_callbacks = false;
 }
 
+void MeshFixDialog::set_min_wall(double thickness)
+{
+    m_min_wall_value = thickness;
+    m_min_wall->set_text(fmt::format("{:.2f}", thickness));
+    update_warning();
+}
+
+void MeshFixDialog::set_show_thickness(bool show)
+{
+    m_ignore_callbacks = true;
+    m_show_thickness->set_checked(show);
+    m_ignore_callbacks = false;
+}
+
+void MeshFixDialog::set_cursor_thickness(std::optional<float> thickness)
+{
+    m_cursor_thickness_value->set_text(thickness.has_value() ? format_thickness(*thickness) : "-");
+}
+
 void MeshFixDialog::set_stats(const MeshFixStats& stats)
 {
     m_stats = stats;
@@ -426,6 +519,13 @@ void MeshFixDialog::set_stats(const MeshFixStats& stats)
     // TRN Mesh fix: The intersections were not checked yet.
     m_intersecting_value->set_text(
         stats.intersecting.has_value() ? std::to_string(*stats.intersecting) : _u8L("not checked")
+    );
+    // TRN Mesh fix: The wall thickness was not analyzed yet.
+    m_thin_value->set_text(
+        stats.thin_faces.has_value() ? std::to_string(*stats.thin_faces) : _u8L("not analyzed")
+    );
+    m_thinnest_value->set_text(
+        stats.thin_faces.has_value() ? format_thickness(stats.thinnest_wall) : "-"
     );
     for (LayoutButton* button : m_marked_buttons)
         button->set_enabled(stats.marked > 0);
@@ -474,6 +574,14 @@ void MeshFixDialog::update_warning()
     if (m_stats.intersecting.value_or(0) > 0)
         problems.emplace_back(
             Slic3r::format(_u8L("Intersecting triangles: %1%"), *m_stats.intersecting)
+        );
+    if (m_stats.thin_faces.value_or(0) > 0)
+        problems.emplace_back(
+            Slic3r::format(
+                _u8L("Walls thinner than %1% mm: %2% triangles"),
+                fmt::format("{:.2f}", m_min_wall_value),
+                *m_stats.thin_faces
+            )
         );
     if (m_painting_warning)
         problems.emplace_back(_u8L(

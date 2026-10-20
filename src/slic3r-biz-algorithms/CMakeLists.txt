@@ -115,6 +115,8 @@ add_library(slic3r-biz-algorithms STATIC
     src/Slic3r/Biz/Algorithms/MeshFix/Diagnostics.cpp
     include/Slic3r/Biz/Algorithms/MeshFix/Session.hpp
     src/Slic3r/Biz/Algorithms/MeshFix/Session.cpp
+    include/Slic3r/Biz/Algorithms/MeshFix/Thickness.hpp
+    src/Slic3r/Biz/Algorithms/MeshFix/Thickness.cpp
 )
 target_include_directories(slic3r-biz-algorithms PUBLIC include)
 target_include_directories(slic3r-biz-algorithms PRIVATE src)
@@ -159,6 +161,7 @@ if(SLIC3R_BUILD_TESTS)
         test/Slic3r/Biz/Algorithms/MeshFix/HoleFillTests.cpp
         test/Slic3r/Biz/Algorithms/MeshFix/RepairTests.cpp
         test/Slic3r/Biz/Algorithms/MeshFix/SessionTests.cpp
+        test/Slic3r/Biz/Algorithms/MeshFix/ThicknessTests.cpp
     )
     target_include_directories(slic3r-biz-algorithms-tests PRIVATE test)
 

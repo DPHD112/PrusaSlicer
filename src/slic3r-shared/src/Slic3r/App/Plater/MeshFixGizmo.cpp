@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include <magic_enum/magic_enum_flags.hpp>
 
+#include "Slic3r/App/Plater/MeshFixColors.hpp"
 #include "Slic3r/App/Plater/MeshFixDialog.hpp"
 #include "Slic3r/App/Plater/MeshFixRenderer.hpp"
 #include "Slic3r/App/Plater/PlaterScenePresenter.hpp"
@@ -123,6 +125,17 @@ MeshFixGizmo::MeshFixGizmo(
         refresh_marking();
         refresh_mesh_edges();
     };
+    callbacks.min_wall_changed = [this](double thickness)
+    {
+        m_min_wall = thickness;
+        refresh_marking();
+        refresh_dialog();
+    };
+    callbacks.show_thickness_changed = [this](bool show)
+    {
+        m_show_thickness = show;
+        refresh_marking();
+    };
 
     // Marking changes stay in the tool, they are not undoable.
     const auto marking = [this](void (MeshFix::Session::*operation)())
@@ -153,6 +166,8 @@ MeshFixGizmo::MeshFixGizmo(
     callbacks.stitch              = [this]() { stitch(); };
     callbacks.remove_noise_shells = [this]() { remove_noise_shells(); };
     callbacks.check_intersections = [this]() { check_intersections(); };
+    callbacks.analyze_thickness   = [this]() { analyze_thickness(); };
+    callbacks.mark_thin_walls     = [this]() { mark_thin_walls(); };
     callbacks.auto_fix            = [this]() { auto_fix(); };
 }
 
@@ -315,11 +330,25 @@ void MeshFixGizmo::update_world_transform()
         project.find_volume_by_id(m_target->object_id, m_target->volume_id);
     if (instance == nullptr || volume == nullptr)
         return;
-    m_world_trafo = instance->get_matrix() * volume->get_matrix();
-    m_world_scale = std::cbrt(std::abs(m_world_trafo.linear().determinant()));
+    const Transform3d previous = m_world_trafo;
+    m_world_trafo              = instance->get_matrix() * volume->get_matrix();
+    m_world_scale              = std::cbrt(std::abs(m_world_trafo.linear().determinant()));
     if (!(m_world_scale > 0.))
         m_world_scale = 1.;
     m_renderer->set_transform(m_world_trafo);
+
+    // Moving or rotating the part keeps its wall thickness, scaling does not.
+    const auto metric = [](const Transform3d& trafo) -> Eigen::Matrix3d
+    { return trafo.linear().transpose() * trafo.linear(); };
+    if (m_session
+        && m_session->thickness_analyzed()
+        && !metric(m_world_trafo).isApprox(metric(previous)))
+    {
+        m_session->clear_thickness();
+        refresh_marking();
+        refresh_dialog();
+        refresh_cursor_thickness();
+    }
 }
 
 void MeshFixGizmo::hide_target_nodes()
@@ -580,6 +609,8 @@ void MeshFixGizmo::update_hover(const Scene::GizmoEventContext& ctx)
 
     if (hole_changed)
         refresh_hole();
+    if (face_changed)
+        refresh_cursor_thickness();
     if (m_tool == MeshFixTool::MarkBrush) {
         if (face_changed || moved)
             refresh_cursor();
@@ -699,6 +730,8 @@ void MeshFixGizmo::push_dialog_state()
     m_dialog->set_fill_mode(m_fill_mode);
     m_dialog->set_stitch_tolerance(m_stitch_tolerance);
     m_dialog->set_show_problems(m_show_problems);
+    m_dialog->set_min_wall(m_min_wall);
+    m_dialog->set_show_thickness(m_show_thickness);
 }
 
 void MeshFixGizmo::refresh_mesh()
@@ -717,25 +750,37 @@ void MeshFixGizmo::refresh_mesh()
     refresh_hole();
     refresh_cursor();
     refresh_dialog();
+    refresh_cursor_thickness();
 }
 
 void MeshFixGizmo::refresh_marking()
 {
     if (!m_session || !m_renderer->exists())
         return;
-    using FaceCategory                = MeshFixRenderer::FaceCategory;
-    const indexed_triangle_set& its   = m_session->mesh();
-    const std::vector<bool>& marked   = m_session->marked();
-    const std::vector<bool>& flipped  = m_session->flipped();
-    const std::vector<bool>& noise    = m_session->noise();
-    const std::vector<bool>& crossing = m_session->intersecting();
+    using FaceCategory                  = MeshFixRenderer::FaceCategory;
+    const indexed_triangle_set& its     = m_session->mesh();
+    const std::vector<bool>& marked     = m_session->marked();
+    const std::vector<bool>& flipped    = m_session->flipped();
+    const std::vector<bool>& noise      = m_session->noise();
+    const std::vector<bool>& crossing   = m_session->intersecting();
+    const std::vector<float>& thickness = m_session->thickness();
+    const bool show_thickness           = m_show_thickness && m_session->thickness_analyzed();
     std::vector<FaceCategory> categories(its.indices.size(), FaceCategory::Normal);
     for (size_t face = 0; face < categories.size(); ++face) {
         if (marked[face])
             categories[face] = FaceCategory::Marked;
         else if (face < m_preview.size() && m_preview[face])
             categories[face] = FaceCategory::Preview;
-        else if (m_show_problems && flipped[face])
+        else if (show_thickness && thickness[face] < m_min_wall) {
+            // Shades from the thinnest walls to the walls close to the minimum.
+            const size_t shade = std::min(
+                size_t(
+                    double(thickness[face]) / m_min_wall * double(MeshFixColors::ThinWallShades)
+                ),
+                MeshFixColors::ThinWallShades - 1
+            );
+            categories[face] = FaceCategory(size_t(FaceCategory::ThinWall) + shade);
+        } else if (m_show_problems && flipped[face])
             categories[face] = FaceCategory::Flipped;
         else if (m_show_problems && crossing[face])
             categories[face] = FaceCategory::Intersecting;
@@ -813,9 +858,32 @@ void MeshFixGizmo::refresh_dialog()
     stats.noise_shells       = diagnostics.noise_shells;
     if (m_session->intersections_detected())
         stats.intersecting = diagnostics.intersecting_faces;
+    if (m_session->thickness_analyzed()) {
+        const std::vector<float>& thickness = m_session->thickness();
+        stats.thin_faces                    = size_t(
+            std::count_if(
+                thickness.begin(),
+                thickness.end(),
+                [this](float value) { return value < m_min_wall; }
+            )
+        );
+        if (!thickness.empty())
+            stats.thinnest_wall = *std::min_element(thickness.begin(), thickness.end());
+    }
     m_dialog->set_stats(stats);
     // The notice explains the last refused edit, the user moved on.
     m_dialog->set_notice({});
+}
+
+void MeshFixGizmo::refresh_cursor_thickness()
+{
+    std::optional<float> thickness;
+    if (m_session
+        && m_session->thickness_analyzed()
+        && m_hover.face >= 0
+        && size_t(m_hover.face) < m_session->thickness().size())
+        thickness = m_session->thickness()[m_hover.face];
+    m_dialog->set_cursor_thickness(thickness);
 }
 
 void MeshFixGizmo::commit(Biz::UndoSnapshotType snapshot_type, indexed_triangle_set split_part)
@@ -989,6 +1057,30 @@ void MeshFixGizmo::check_intersections()
     if (!m_session)
         return;
     m_session->detect_intersections();
+    refresh_marking();
+    refresh_dialog();
+}
+
+void MeshFixGizmo::analyze_thickness()
+{
+    if (!m_session)
+        return;
+    // Measured in the world, where the minimum wall applies.
+    m_session->analyze_thickness(m_world_trafo);
+    m_show_thickness = true;
+    m_dialog->set_show_thickness(true);
+    refresh_marking();
+    refresh_dialog();
+    refresh_cursor_thickness();
+}
+
+void MeshFixGizmo::mark_thin_walls()
+{
+    if (!m_session)
+        return;
+    if (!m_session->thickness_analyzed())
+        analyze_thickness();
+    m_session->mark_thin_faces(float(m_min_wall));
     refresh_marking();
     refresh_dialog();
 }

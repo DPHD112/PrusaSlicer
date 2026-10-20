@@ -117,6 +117,18 @@ public:
         return m_intersections_detected;
     }
 
+    // Wall thickness of each triangle, see measure_thickness(). Empty until analyze_thickness()
+    // is called.
+    const std::vector<float>& thickness() const
+    {
+        return m_thickness;
+    }
+
+    bool thickness_analyzed() const
+    {
+        return m_thickness_analyzed;
+    }
+
     /**
      * @brief Triangles a click with the tool would mark.
      * @param face Clicked triangle.
@@ -150,6 +162,10 @@ public:
     void mark_flipped_faces();
     void mark_noise_shells();
     void mark_intersecting_faces();
+    /**
+     * @brief Mark the triangles thinner than the limit, nothing if the thickness was not analyzed.
+     */
+    void mark_thin_faces(float limit);
 
     /**
      * @brief Hole a ray points at, to fill it by a click.
@@ -202,6 +218,15 @@ public:
      * @brief Find intersecting triangles, an expensive check which is not run after every edit.
      */
     void detect_intersections();
+    /**
+     * @brief Measure the wall thickness of the triangles, an expensive analysis which is not run
+     * after every edit.
+     * @param trafo Transformation of the mesh to the units the thickness is measured in, the world
+     * transformation of a part.
+     */
+    void analyze_thickness(const Domain::Transform3d& trafo);
+    // Forget the thickness, for example after the scale of the mesh changed.
+    void clear_thickness();
 
 private:
     // Keep the marking only if the triangle indices did not change, new triangles stay unmarked.
@@ -218,6 +243,8 @@ private:
     FaceMask m_noise;
     FaceMask m_intersecting;
     bool m_intersections_detected{false};
+    std::vector<float> m_thickness;
+    bool m_thickness_analyzed{false};
 };
 
 } // namespace Slic3r::Biz::Algorithms::MeshFix

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "Slic3r/Biz/Algorithms/MeshFix/Edit.hpp"
+#include "Slic3r/Biz/Algorithms/MeshFix/Thickness.hpp"
 #include "Slic3r/Biz/Algorithms/TriangleMesh.hpp"
 
 namespace Slic3r::Biz::Algorithms::MeshFix {
@@ -194,6 +195,7 @@ void Session::update_after_edit(bool keep_marks)
     m_noise   = MeshFix::mark_noise_shells(m_mesh, *m_topology);
     m_intersecting.assign(faces_count, false);
     m_intersections_detected = false;
+    clear_thickness();
 
     m_diagnostics                    = MeshDiagnostics{};
     m_diagnostics.faces              = faces_count;
@@ -464,6 +466,37 @@ AutoFixReport Session::auto_fix(const AutoFixParams& params)
     m_mesh = std::move(fixed);
     update_after_edit(false);
     return report;
+}
+
+void Session::mark_thin_faces(float limit)
+{
+    if (!m_thickness_analyzed)
+        return;
+    FaceMask thin(m_mesh.indices.size(), false);
+    for (size_t face = 0; face < thin.size(); ++face)
+        thin[face] = m_thickness[face] < limit;
+    mark(thin, true);
+}
+
+void Session::analyze_thickness(const Transform3d& trafo)
+{
+    // Measured on the transformed mesh, a non-uniform scale changes the thickness differently in
+    // different directions.
+    indexed_triangle_set transformed = m_mesh;
+    for (Vec3f& vertex : transformed.vertices)
+        vertex = (trafo * vertex.cast<double>()).cast<float>();
+    // A mirroring turns the triangles inside out.
+    if (trafo.linear().determinant() < 0.)
+        for (stl_triangle_vertex_indices& indices : transformed.indices)
+            std::swap(indices[1], indices[2]);
+    m_thickness          = measure_thickness(transformed, m_flipped);
+    m_thickness_analyzed = true;
+}
+
+void Session::clear_thickness()
+{
+    m_thickness.clear();
+    m_thickness_analyzed = false;
 }
 
 void Session::detect_intersections()
