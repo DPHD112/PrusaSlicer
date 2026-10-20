@@ -19,6 +19,7 @@ using namespace Slic3r::Biz::Algorithms::MeshFix::Test;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_cube;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_cylinder;
 using Slic3r::Biz::Algorithms::TriangleMesh::its_make_sphere;
+using Slic3r::Biz::Algorithms::TriangleMesh::its_merge_vertices;
 using Slic3r::Domain::Vec3f;
 
 namespace {
@@ -104,10 +105,10 @@ TEST_CASE("Overlapping shells are measured as one solid", "[algorithms][mesh-fix
     for (size_t face = 0; face < 12; ++face)
         if (face_normal(mesh, face).dot(-Vec3f::UnitX()) > 0.99f)
             CHECK(thickness[face] == Approx(15.).margin(1e-4));
-    // The side of the box inside of the cube is not a wall.
+    // The side of the box inside of the cube is not a wall, but for the parts outside of it.
     for (size_t face = 12; face < 24; ++face)
         if (face_normal(mesh, face).dot(-Vec3f::UnitX()) > 0.99f)
-            CHECK(std::isinf(thickness[face]));
+            CHECK((std::isinf(thickness[face]) || thickness[face] == Approx(10.).margin(1e-4)));
 }
 
 TEST_CASE("Overlapping bars are as thick as their union", "[algorithms][mesh-fix]")
@@ -196,4 +197,121 @@ TEST_CASE("Flipped triangles are measured as if they were flipped", "[algorithms
             // Without knowing, the ray goes out of the plate.
             CHECK(std::isinf(measure_thickness(plate, MeshTopology(plate))[face]));
         }
+}
+
+TEST_CASE("Walls around cavities", "[algorithms][mesh-fix]")
+{
+    SECTION("cavity near the side of a block")
+    {
+        indexed_triangle_set mesh = its_make_cube(10., 10., 10.);
+        append(mesh, inverted(its_make_cube(3., 3., 3.)), Vec3f{0.5f, 3.f, 3.f});
+        const MeshTopology topology(mesh);
+        const std::vector<float> thickness =
+            measure_thickness(mesh, topology, mark_flipped_faces(mesh, topology));
+        CHECK(*std::min_element(thickness.begin(), thickness.end()) == Approx(0.5).margin(1e-4));
+        // The cavity measures the material around it.
+        for (size_t face = 12; face < 24; ++face)
+            CHECK(std::isfinite(thickness[face]));
+    }
+    SECTION("plate floating in a cavity")
+    {
+        indexed_triangle_set mesh = its_make_cube(20., 20., 20.);
+        append(mesh, inverted(its_make_cube(16., 16., 16.)), Vec3f{2.f, 2.f, 2.f});
+        append(mesh, its_make_cube(5., 5., 0.4), Vec3f{7.f, 7.f, 9.f});
+        const MeshTopology topology(mesh);
+        const std::vector<float> thickness =
+            measure_thickness(mesh, topology, mark_flipped_faces(mesh, topology));
+        // The walls of the cage.
+        for (size_t face = 12; face < 24; ++face)
+            CHECK(thickness[face] == Approx(2.).margin(1e-4));
+        for (size_t face = 24; face < 36; ++face)
+            if (std::abs(face_normal(mesh, face).z()) > 0.99f)
+                CHECK(thickness[face] == Approx(0.4).margin(1e-4));
+    }
+}
+
+TEST_CASE("Open shells do not bound a solid", "[algorithms][mesh-fix]")
+{
+    SECTION("loose triangle under a plate")
+    {
+        indexed_triangle_set mesh = its_make_cube(10., 10., 0.5);
+        const int first           = int(mesh.vertices.size());
+        mesh.vertices.insert(
+            mesh.vertices.end(),
+            {{-50.f, -50.f, -10.f}, {0.f, 50.f, 1.f}, {50.f, -50.f, -10.f}}
+        );
+        mesh.indices.push_back({first, first + 1, first + 2});
+        const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+        check_all(thickness_facing(mesh, thickness, Vec3f::UnitZ()), 0.5);
+    }
+    SECTION("plate in an open box")
+    {
+        indexed_triangle_set mesh = its_make_cube(10., 10., 10.);
+        remove_faces_if(mesh, [&](size_t face) { return face_normal(mesh, face).z() > 0.99f; });
+        const size_t box_faces = mesh.indices.size();
+        append(mesh, its_make_cube(4., 4., 0.5), Vec3f{3.f, 3.f, 5.f});
+        const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+        for (size_t face = box_faces; face < mesh.indices.size(); ++face)
+            CHECK(
+                thickness[face]
+                == Approx(std::abs(face_normal(mesh, face).z()) > 0.99f ? 0.5 : 4.).margin(1e-4)
+            );
+    }
+    SECTION("loose triangle inside of a block")
+    {
+        indexed_triangle_set mesh = its_make_cube(10., 10., 10.);
+        const int first           = int(mesh.vertices.size());
+        mesh.vertices
+            .insert(mesh.vertices.end(), {{2.f, 2.f, 9.5f}, {5.f, 8.f, 9.5f}, {8.f, 2.f, 9.5f}});
+        mesh.indices.push_back({first, first + 1, first + 2});
+        const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+        for (size_t face = 0; face < 12; ++face)
+            CHECK(thickness[face] == Approx(10.).margin(1e-4));
+    }
+}
+
+TEST_CASE("Thin features partly inside of another shell", "[algorithms][mesh-fix]")
+{
+    // A pin through a block, sticking out of it by 1.5.
+    indexed_triangle_set mesh = its_make_cube(10., 10., 10.);
+    append(mesh, its_make_cylinder(0.4, 11.5, 2. * std::numbers::pi / 24.), Vec3f{5.f, 5.f, 0.f});
+    const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+    size_t sides                       = 0;
+    for (size_t face = 12; face < mesh.indices.size(); ++face)
+        if (std::abs(face_normal(mesh, face).z()) < 0.01f) {
+            CHECK(thickness[face] == Approx(0.8 * std::cos(std::numbers::pi / 24.)).epsilon(0.02));
+            ++sides;
+        }
+    CHECK(sides == 48);
+}
+
+TEST_CASE("Shell ending just below the surface", "[algorithms][mesh-fix]")
+{
+    // A box inside of the plate, ending a few float roundings below the top of the plate, so that
+    // the crossings at the top are close together.
+    for (const float gap : {3e-5f, 5e-5f, 7e-5f}) {
+        indexed_triangle_set mesh = its_make_cube(10., 10., 1.);
+        append(mesh, its_make_cube(12., 12., 0.7 - gap), Vec3f{-1.f, -1.f, 0.3f});
+        const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+        for (size_t face = 0; face < 12; ++face)
+            if (face_normal(mesh, face).z() > 0.99f)
+                CHECK(thickness[face] == Approx(1.).margin(1e-4));
+    }
+}
+
+TEST_CASE("Bodies welded at an edge are measured as one solid", "[algorithms][mesh-fix]")
+{
+    // A base and a wall standing on its side, sharing an edge after merging the vertices.
+    indexed_triangle_set mesh = its_make_cube(10., 10., 2.);
+    append(mesh, its_make_cube(2., 10., 10.), Vec3f::Zero());
+    its_merge_vertices(mesh);
+    const std::vector<float> thickness = measure_thickness(mesh, MeshTopology(mesh));
+    size_t sides                       = 0;
+    for (size_t face = 0; face < mesh.indices.size(); ++face)
+        if (face_normal(mesh, face).x() < -0.99f && centroid(mesh, face).z() < 2.f) {
+            // Through the wall and the base.
+            CHECK(thickness[face] == Approx(10.).margin(1e-4));
+            ++sides;
+        }
+    CHECK(sides == 2);
 }

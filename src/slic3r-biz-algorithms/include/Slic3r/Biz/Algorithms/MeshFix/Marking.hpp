@@ -87,7 +87,9 @@ FaceMask mark_bad_edge_faces(const MeshTopology& topology);
  *
  * The orientation is propagated over edges shared by exactly two triangles. Each consistently
  * connected region is then oriented to have a positive volume. Regions with a negligible volume
- * (open flat surfaces) keep the orientation of the majority of their triangles.
+ * (open flat surfaces) keep the orientation of the majority of their triangles, and so do closed
+ * regions inside of another closed region: those bound a cavity facing inwards or a body embedded
+ * in the solid facing outwards.
  * Flipping the marked triangles makes the mesh consistently oriented, see unify_normals().
  */
 FaceMask mark_flipped_faces(const indexed_triangle_set& its, const MeshTopology& topology);

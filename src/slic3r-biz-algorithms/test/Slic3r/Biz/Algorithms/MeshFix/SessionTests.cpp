@@ -368,6 +368,20 @@ TEST_CASE("Session wall thickness", "[algorithms][mesh-fix]")
     CHECK(session.thickness().empty());
 }
 
+TEST_CASE("Session wall thickness of a hollow part", "[algorithms][mesh-fix]")
+{
+    // A cavity 0.5 under the side of a block.
+    indexed_triangle_set mesh = its_make_cube(10., 10., 10.);
+    append(mesh, inverted(its_make_cube(3., 3., 3.)), Vec3f{0.5f, 3.f, 3.f});
+    Session session(std::move(mesh));
+    CHECK(session.diagnostics().flipped_faces == 0);
+    session.analyze_thickness(Transform3d::Identity());
+    const std::vector<float>& thickness = session.thickness();
+    CHECK(*std::min_element(thickness.begin(), thickness.end()) == Approx(0.5).margin(1e-4));
+    session.mark_thin_faces(1.f);
+    CHECK(session.marked_count() > 0);
+}
+
 TEST_CASE("Session wall thickness is the same anywhere on the bed", "[algorithms][mesh-fix]")
 {
     // A small bar of two touching cubes, rotated and moved far from the origin.

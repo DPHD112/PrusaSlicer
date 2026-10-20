@@ -197,6 +197,32 @@ TEST_CASE("Mark flipped triangles", "[algorithms][mesh-fix]")
         CHECK(count_marked(flipped) == 1);
         CHECK(flipped[3]);
     }
+    SECTION("cavity faces inwards")
+    {
+        indexed_triangle_set block = its_make_cube(10., 10., 10.);
+        append(block, inverted(its_make_cube(3., 3., 3.)), Vec3f{0.5f, 3.f, 3.f});
+        CHECK(count_marked(mark_flipped_faces(block, MeshTopology(block))) == 0);
+        // A flipped triangle of the cavity.
+        std::swap(block.indices[15][1], block.indices[15][2]);
+        const FaceMask flipped = mark_flipped_faces(block, MeshTopology(block));
+        CHECK(count_marked(flipped) == 1);
+        CHECK(flipped[15]);
+    }
+    SECTION("body embedded in a block faces outwards")
+    {
+        indexed_triangle_set block = its_make_cube(10., 10., 10.);
+        append(block, its_make_cube(3., 3., 3.), Vec3f{4.f, 4.f, 4.f});
+        CHECK(count_marked(mark_flipped_faces(block, MeshTopology(block))) == 0);
+    }
+    SECTION("inside out body overlapping a block")
+    {
+        indexed_triangle_set block = its_make_cube(10., 10., 10.);
+        append(block, inverted(its_make_cube(4., 4., 4.)), Vec3f{8.f, 3.f, 3.f});
+        const FaceMask flipped = mark_flipped_faces(block, MeshTopology(block));
+        CHECK(count_marked(flipped) == 12);
+        for (size_t face = 12; face < 24; ++face)
+            CHECK(flipped[face]);
+    }
 }
 
 TEST_CASE("Mark bad edges and noise shells", "[algorithms][mesh-fix]")

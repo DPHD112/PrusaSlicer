@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <numbers>
 #include <span>
+#include <vector>
 
+#include "Slic3r/Biz/Algorithms/AABBTreeIndirect.hpp"
 #include "Slic3r/Domain/Types.hpp"
 
 namespace Slic3r::Biz::Algorithms::MeshFix {
@@ -25,6 +27,162 @@ Vec3d face_normal(const indexed_triangle_set& its, int face)
     const Vec3d normal                         = (v1 - v0).cross(v2 - v0);
     const double length                        = normal.norm();
     return length > 0. ? Vec3d(normal / length) : Vec3d::Zero();
+}
+
+// A region of triangles with a consistently propagated orientation.
+struct OrientedRegion
+{
+    std::vector<int> faces;
+    // Orientation the triangles should have, +1 as propagated, -1 reversed.
+    int8_t correct_orientation{1};
+    // Orientation of the majority of the triangles in the mesh.
+    int8_t majority_orientation{1};
+    // Bounds a volume, all its edges are shared by two triangles.
+    bool closed{false};
+    Eigen::AlignedBox<double, 3> box;
+};
+
+// Regions inside of an odd number of other closed regions, at all of several of their vertices.
+// They bound a cavity or a body embedded in the solid.
+std::vector<bool>
+nested_regions(const indexed_triangle_set& its, const std::vector<OrientedRegion>& regions)
+{
+    std::vector<bool> nested(regions.size(), false);
+    using Tree = AABBTreeIndirect::Tree<3, double>;
+    using Box  = Tree::BoundingBox;
+
+    struct Input
+    {
+        size_t idx() const
+        {
+            return index;
+        }
+
+        const Box& bbox() const
+        {
+            return box;
+        }
+
+        const Tree::VectorType& centroid() const
+        {
+            return center;
+        }
+
+        size_t index;
+        Box box;
+        Tree::VectorType center;
+    };
+
+    Box mesh_box;
+    std::vector<Input> input;
+    for (size_t region = 0; region < regions.size(); ++region)
+        if (regions[region].closed) {
+            input.push_back({region, regions[region].box, regions[region].box.center()});
+            mesh_box.extend(regions[region].box);
+        }
+    if (input.size() < 2)
+        return nested;
+    const double tolerance = 1e-6 * mesh_box.diagonal().norm();
+    Tree region_tree;
+    region_tree.build(std::move(input));
+
+    // Built only if some region may be nested.
+    AABBTreeIndirect::Tree<3, float> face_tree;
+    std::vector<int> face_container;
+    // Not along the axes nor the diagonals of the usual meshes.
+    const Vec3d direction = Vec3d(0.5773, 0.5774, 0.5775).normalized();
+
+    std::vector<int> containers;
+    std::vector<int> crossings;
+    std::vector<double> last;
+    std::vector<igl::Hit> hits;
+    for (size_t region = 0; region < regions.size(); ++region) {
+        if (!regions[region].closed)
+            continue;
+        // A region can only be inside of a region whose bounding box contains its bounding box.
+        const Box& box = regions[region].box;
+        containers.clear();
+        AABBTreeIndirect::traverse(
+            region_tree,
+            AABBTreeIndirect::intersecting(box),
+            [&](const Tree::Node& node)
+            {
+                const Box& other = regions[node.idx].box;
+                const Box margin(
+                    other.min() - Vec3d::Constant(tolerance),
+                    other.max() + Vec3d::Constant(tolerance)
+                );
+                if (node.idx != region && margin.contains(box))
+                    containers.push_back(int(node.idx));
+                return true;
+            }
+        );
+        if (containers.empty())
+            continue;
+
+        if (face_tree.empty()) {
+            face_tree = AABBTreeIndirect::
+                build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices);
+            face_container.assign(its.indices.size(), -1);
+        }
+        for (size_t slot = 0; slot < containers.size(); ++slot)
+            for (int face : regions[containers[slot]].faces)
+                face_container[face] = int(slot);
+
+        // The extreme vertices of the region, which a region overlapping another one but not
+        // nested in it has outside of the other one.
+        std::array<int, 6> extremes;
+        extremes.fill(its.indices[regions[region].faces.front()][0]);
+        for (int face : regions[region].faces)
+            for (int vertex : its.indices[face])
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (its.vertices[vertex][axis] < its.vertices[extremes[2 * axis]][axis])
+                        extremes[2 * axis] = vertex;
+                    if (its.vertices[vertex][axis] > its.vertices[extremes[2 * axis + 1]][axis])
+                        extremes[2 * axis + 1] = vertex;
+                }
+        bool all_odd = true;
+        for (int vertex : extremes) {
+            const Vec3d origin = its.vertices[vertex].cast<double>();
+            AABBTreeIndirect::intersect_ray_all_hits(
+                its.vertices,
+                its.indices,
+                face_tree,
+                origin,
+                direction,
+                hits
+            );
+            crossings.assign(containers.size(), 0);
+            last.assign(containers.size(), 0.);
+            for (const igl::Hit& hit : hits) {
+                const int slot = face_container[hit.id];
+                if (slot < 0)
+                    continue;
+                // A ray through an edge or a vertex hits all triangles around it.
+                if (crossings[slot] > 0 && double(hit.t) - last[slot] <= tolerance)
+                    continue;
+                ++crossings[slot];
+                last[slot] = double(hit.t);
+            }
+            const size_t odd = size_t(
+                std::count_if(
+                    crossings.begin(),
+                    crossings.end(),
+                    [](int count) { return count % 2 == 1; }
+                )
+            );
+            if (odd % 2 == 0) {
+                all_odd = false;
+                break;
+            }
+        }
+        nested[region] = all_odd;
+
+        for (int container : containers)
+            for (int face : regions[container].faces)
+                face_container[face] = -1;
+    }
+    return nested;
 }
 
 double cos_of_degrees(float angle_deg)
@@ -249,6 +407,7 @@ FaceMask mark_flipped_faces(const indexed_triangle_set& its, const MeshTopology&
     const size_t faces_count = topology.faces_count();
     FaceMask mask(faces_count, false);
     std::vector<int8_t> orientation(faces_count, 0);
+    std::vector<OrientedRegion> regions;
     std::vector<int> region;
 
     for (size_t seed = 0; seed < faces_count; ++seed) {
@@ -300,15 +459,35 @@ FaceMask mark_flipped_faces(const indexed_triangle_set& its, const MeshTopology&
                 ++positive_count;
         }
 
-        const double diagonal      = bbox.diagonal().norm();
-        int8_t correct_orientation = 1;
-        if (std::abs(volume) > 1e-6 * diagonal * diagonal * diagonal)
-            correct_orientation = volume > 0. ? 1 : -1;
+        const double diagonal = bbox.diagonal().norm();
+        OrientedRegion oriented;
+        oriented.majority_orientation = 2 * positive_count >= region.size() ? 1 : -1;
+        oriented.closed               = std::abs(volume) > 1e-6 * diagonal * diagonal * diagonal;
+        if (oriented.closed)
+            oriented.correct_orientation = volume > 0. ? 1 : -1;
         else
-            correct_orientation = 2 * positive_count >= region.size() ? 1 : -1;
-
+            oriented.correct_orientation = oriented.majority_orientation;
         for (int face : region)
-            if (orientation[face] != correct_orientation)
+            for (int edge = 0; edge < 3; ++edge) {
+                const int edge_idx  = topology.edge_index(face, edge);
+                const EdgeKind kind = edge_idx < 0 ? EdgeKind::Open : topology.edge_kind(edge_idx);
+                if (kind != EdgeKind::Manifold && kind != EdgeKind::Inconsistent)
+                    oriented.closed = false;
+            }
+        oriented.faces = region;
+        oriented.box   = bbox;
+        regions.push_back(std::move(oriented));
+    }
+
+    // A region inside of another one bounds a cavity, facing inwards, or a body embedded in the
+    // solid, facing outwards. The majority of its triangles tells which one.
+    const std::vector<bool> nested = nested_regions(its, regions);
+    for (size_t idx = 0; idx < regions.size(); ++idx) {
+        const OrientedRegion& oriented = regions[idx];
+        const int8_t correct =
+            nested[idx] ? oriented.majority_orientation : oriented.correct_orientation;
+        for (int face : oriented.faces)
+            if (orientation[face] != correct)
                 mask[face] = true;
     }
     return mask;

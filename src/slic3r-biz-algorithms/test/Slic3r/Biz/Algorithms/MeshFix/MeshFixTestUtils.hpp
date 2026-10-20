@@ -3,6 +3,7 @@
 #include <admesh/stl.h>
 
 #include <algorithm>
+#include <utility>
 #include <vector>
 
 #include "Slic3r/Biz/Algorithms/MeshFix/MeshTopology.hpp"
@@ -67,6 +68,16 @@ append(indexed_triangle_set& its, const indexed_triangle_set& other, const Domai
         its.indices.push_back(
             {face[0] + first_vertex, face[1] + first_vertex, face[2] + first_vertex}
         );
+}
+
+/**
+ * The mesh turned inside out, as the surface of a cavity.
+ */
+inline indexed_triangle_set inverted(indexed_triangle_set its)
+{
+    for (stl_triangle_vertex_indices& face : its.indices)
+        std::swap(face[1], face[2]);
+    return its;
 }
 
 } // namespace Slic3r::Biz::Algorithms::MeshFix::Test
